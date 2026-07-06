@@ -2,6 +2,16 @@
 
 Self-hosted [Mem0](https://mem0.ai) memory layer for AI coding agents, running **entirely on your machine** — no cloud API calls, no data leaving your laptop.
 
+## Target behavior
+
+The system gives your AI coding agent **persistent memory across sessions**. Without it, every new session starts from zero — the agent has to re-read your codebase to understand context. With it:
+
+- **Before answering:** the agent searches stored memories for relevant past context (decisions, patterns, preferences)
+- **After completing tasks:** the agent saves what it learned (files changed, decisions made, bugs fixed)
+- **Next session:** the agent recalls yesterday's work instantly instead of re-reading everything
+
+The memory is **semantic** — the agent searches with natural language and gets back the most relevant facts, not keyword matches. It's **intelligent** — when storing new info, the LLM extracts key facts and deduplicates against existing memories. And it's **private** — everything runs locally, no data leaves your machine.
+
 **One command:**
 
 ```bash
