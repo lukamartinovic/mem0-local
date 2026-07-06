@@ -123,7 +123,7 @@ cp .env.example .env
 
 | Variable | Default | Description |
 |---|---|---|
-| `MEM0_LLM_MODEL` | `qwen2.5:3b` | Ollama LLM model (must support tool calling) |
+| `MEM0_LLM_MODEL` | `qwen2.5:7b` | Ollama LLM model (must support tool calling) |
 | `MEM0_EMBED_MODEL` | `nomic-embed-text` | Ollama embedding model |
 | `MEM0_DEFAULT_USER_ID` | `dev` | Default user_id in tool calls |
 
@@ -177,7 +177,7 @@ Since local MCP doesn't have lifecycle hooks, add this to your IDE's custom inst
 ```
 mem0-local/
 ├── setup.sh             # One-command setup (installs Ollama, pulls models, starts containers)
-├── docker-compose.yml   # Qdrant + MCP server (+ optional Ollama in Docker mode)
+├── docker-compose.yml   # Qdrant + MCP server (Ollama runs on host)
 ├── Dockerfile            # MCP server image
 ├── entrypoint.sh         # Waits for Ollama + Qdrant, starts MCP server
 ├── mcp_server.py         # MCP server — 9 tools, HTTP JSON-RPC
