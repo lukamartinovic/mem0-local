@@ -604,6 +604,23 @@ def _ollama_reachable() -> bool:
         return False
 
 
+def _llm_model_available() -> bool:
+    """Check if the configured LLM model is available on Ollama (non-raising).
+
+    Returns True if the model is listed in Ollama's /api/tags response.
+    Used by add_memory to auto-degrade to infer=False when the LLM model
+    isn't loaded (e.g. not pulled, Ollama running with different models).
+    """
+    try:
+        resp = urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=5)
+        data = json.loads(resp.read())
+        models = [m.get("name", "") for m in data.get("models", [])]
+        llm_model = CONFIG["llm"]["config"]["model"]
+        return any(llm_model in m for m in models)
+    except Exception:
+        return False
+
+
 def _qdrant_reachable() -> bool:
     """Check if Qdrant is reachable (non-raising). For health endpoint."""
     try:
@@ -767,6 +784,20 @@ def execute_tool(name: str, arguments: dict) -> dict:
         infer = arguments.get("infer", True)
         metadata = arguments.get("metadata")
         model_name = CONFIG["llm"]["config"]["model"]
+
+        # Auto-degrade: if infer=True but the LLM model isn't available on
+        # Ollama, fall back to infer=False (raw text storage) with a notice.
+        # This lets the server work without the LLM model — memories are stored
+        # as raw text and searched via embeddings only (no fact extraction).
+        auto_degraded = False
+        if infer and not _llm_model_available():
+            infer = False
+            auto_degraded = True
+            print(f"[mcp_server] ⚠️  LLM model '{model_name}' not available on Ollama. "
+                  f"Storing as raw text (infer=False). Memories will be searchable "
+                  f"but without LLM fact extraction. To enable: ollama pull {model_name}",
+                  file=sys.stderr, flush=True)
+
         MAX_CHUNK_CHARS = _get_chunk_size()
         all_results = []
         chunk_errors = []
@@ -854,6 +885,9 @@ def execute_tool(name: str, arguments: dict) -> dict:
 
         # Merge results
         merged = {"results": [], "chunks": len(all_results)}
+        if auto_degraded:
+            merged["auto_degraded"] = True
+            merged["notice"] = f"LLM model '{model_name}' not available — stored as raw text (infer=False). Run: ollama pull {model_name}"
         for r in all_results:
             if isinstance(r, dict) and "results" in r:
                 merged["results"].extend(r["results"])
