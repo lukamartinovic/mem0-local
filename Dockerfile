@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf 
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the MCP server
-COPY mcp_server.py selftest.py entrypoint.sh pytest.ini ./
+COPY mcp_server.py selftest.py entrypoint.sh pytest.ini conftest.py ./
 COPY tests/ tests/
 RUN chmod +x entrypoint.sh
 # Clear any Python bytecode cache so updated .py files are always used
