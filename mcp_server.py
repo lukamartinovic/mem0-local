@@ -59,7 +59,7 @@ CONFIG = {
             "model": _env("MEM0_LLM_MODEL", "qwen2.5:7b"),
             "ollama_base_url": OLLAMA_URL,
             "temperature": _env_float("MEM0_LLM_TEMPERATURE", 0.1),
-            "max_tokens": _env_int("MEM0_LLM_MAX_TOKENS", 2000),
+            "max_tokens": _env_int("MEM0_LLM_MAX_TOKENS", 4000),
         },
     },
     "embedder": {
