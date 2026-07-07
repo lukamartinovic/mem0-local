@@ -3,7 +3,7 @@
 mem0-local MCP server — HTTP transport.
 
 Runs inside a Docker container alongside Ollama and Qdrant.
-Exposes 9 memory tools via MCP over HTTP (Streamable HTTP transport).
+Exposes 12 memory tools via MCP over HTTP (Streamable HTTP transport).
 
 Environment variables (all have sensible defaults for Docker Compose):
     MEM0_LLM_MODEL          default: qwen2.5:7b
@@ -19,10 +19,16 @@ Environment variables (all have sensible defaults for Docker Compose):
 """
 
 import asyncio
+import csv
+import io
 import json
 import os
 import sys
-from typing import Any
+import threading
+import time
+import urllib.request
+import urllib.error
+from typing import Any, Tuple, List, Optional
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -80,6 +86,20 @@ MCP_PORT = _env_int("MCP_PORT", 8765)
 
 # ── Lazy initialization ──────────────────────────────────────────────────────
 
+# Initialization lifecycle for the health endpoint.
+# "starting" → "initializing" → "ready" or "error"
+_init_status = "starting"
+_init_error: Optional[str] = None
+
+# Cache for the LLM model status ping (Feature 5).
+# Updated by _ping_llm_model() at most every 30 seconds.
+_LLM_PING_CACHE_TTL = 30.0
+_llm_ping_cache: dict = {
+    "status": None,        # "loaded" | "unloaded" | "unreachable"
+    "checked_at": 0.0,     # monotonic timestamp of last check
+}
+_llm_ping_lock = threading.Lock()
+
 _memory: Any = None
 
 def get_memory() -> Any:
@@ -89,17 +109,43 @@ def get_memory() -> Any:
         _memory = Memory.from_config(CONFIG)
     return _memory
 
-
-def _chunk_text(text: str, max_chars: int = 3000, context_header: str = "") -> list[str]:
+def _chunk_text(text: str, max_chars: int = 3000, context_header: str = "") -> List[str]:
     """Split text into chunks at paragraph boundaries, each under max_chars.
     If context_header is provided, it's prepended to each chunk so the LLM
-    knows what document the chunk belongs to."""
+    knows what document the chunk belongs to.
+
+    Splits at \\n\\n (paragraphs) → \\n (lines) → word boundaries, so even
+    text with no structure (single long line) is correctly chunked."""
     header_len = len(context_header) + 2 if context_header else 0  # +2 for \n\n
     if len(text) + header_len <= max_chars:
         return [text] if not context_header else [context_header + "\n\n" + text]
 
-    header_len = len(context_header) + 2 if context_header else 0  # +2 for \n\n
     effective_max = max_chars - header_len
+
+    def _hard_split(s: str, limit: int) -> List[str]:
+        """Split a string with no newlines at word boundaries, each under limit.
+        If a single word exceeds limit, splits at character boundaries."""
+        if len(s) <= limit:
+            return [s]
+        words = s.split(" ")
+        chunks = []
+        current = ""
+        for word in words:
+            # If the word itself exceeds the limit, hard-split it at char boundaries
+            if len(word) > limit:
+                if current:
+                    chunks.append(current)
+                    current = ""
+                for i in range(0, len(word), limit):
+                    chunks.append(word[i:i + limit])
+            elif len(current) + len(word) + 1 > limit and current:
+                chunks.append(current)
+                current = word
+            else:
+                current = (current + " " + word) if current else word
+        if current:
+            chunks.append(current)
+        return chunks
 
     chunks = []
     paragraphs = text.split("\n\n")
@@ -109,13 +155,19 @@ def _chunk_text(text: str, max_chars: int = 3000, context_header: str = "") -> l
             if current:
                 chunks.append(current)
             if len(para) > effective_max:
+                # Split paragraph by lines first
                 for line in para.split("\n"):
-                    if len(current) + len(line) + 1 > effective_max:
-                        if current:
-                            chunks.append(current)
-                        current = line
+                    if len(line) > effective_max:
+                        # Line itself is too long — hard-split at word boundaries
+                        for piece in _hard_split(line, effective_max):
+                            chunks.append(piece)
                     else:
-                        current = (current + "\n" + line) if current else line
+                        if len(current) + len(line) + 1 > effective_max:
+                            if current:
+                                chunks.append(current)
+                            current = line
+                        else:
+                            current = (current + "\n" + line) if current else line
             else:
                 current = para
         else:
@@ -155,102 +207,112 @@ def _get_chunk_size() -> int:
             best_len = len(key)
     return best_match if best_match is not None else 3000
 
-def init_memory() -> Any:
-    """Eagerly initialize Memory — creates Qdrant collections on startup.
-    Also checks for and fixes dimension mismatches before init."""
-    global _memory
-    if _memory is None:
-        import urllib.request
-        import urllib.error
-        import json as _json
 
-        embed_dims = CONFIG["vector_store"]["config"]["embedding_model_dims"]
-        qdrant_host = CONFIG["vector_store"]["config"]["host"]
-        qdrant_port = CONFIG["vector_store"]["config"]["port"]
-        qdrant_base = f"http://{qdrant_host}:{qdrant_port}"
+def _detect_conversation(content: str) -> Tuple[bool, Optional[List]]:
+    """Detect if content is a JSON array of {role, content} messages.
 
-        # Check existing collections for dimension mismatches
-        # If a collection exists with wrong dims, delete it so mem0 recreates correctly
-        for col_name in ("mem0", "mem0migrations"):
-            try:
-                resp = urllib.request.urlopen(f"{qdrant_base}/collections/{col_name}", timeout=5)
-                data = _json.loads(resp.read())
-                vectors = data.get("result", {}).get("config", {}).get("params", {}).get("vectors", {})
-                existing_dim = None
-                if isinstance(vectors, dict):
-                    # Named vectors: {name: {size: N, ...}}
-                    for key, val in vectors.items():
-                        if isinstance(val, dict) and "size" in val:
-                            existing_dim = val["size"]
-                            break
-                    # Flat config: {size: N, distance: ...}
-                    if existing_dim is None and "size" in vectors:
-                        existing_dim = vectors["size"]
-                if existing_dim is not None and existing_dim != embed_dims:
-                    print(f"[mcp_server] ⚠️  Collection '{col_name}' has {existing_dim} dims, "
-                          f"embedder needs {embed_dims}. Deleting...", flush=True)
-                    req = urllib.request.Request(
-                        f"{qdrant_base}/collections/{col_name}",
-                        method="DELETE",
-                    )
-                    urllib.request.urlopen(req, timeout=10)
-                    print(f"[mcp_server] ✅ Deleted stale collection '{col_name}'", flush=True)
-                elif existing_dim is not None:
-                    print(f"[mcp_server] ✅ Collection '{col_name}' dims OK ({existing_dim})", flush=True)
-            except urllib.error.HTTPError as e:
-                if e.code == 404:
-                    pass  # Collection doesn't exist yet — that's fine
-            except Exception:
-                pass  # Qdrant not ready yet — mem0 will handle it
+    Returns (is_conversation, parsed_messages) — if not a conversation,
+    returns (False, None). This is extracted from add_memory so it can
+    be tested independently of the LLM/Qdrant pipeline.
+    """
+    if not content or not isinstance(content, str):
+        return False, None
+    try:
+        parsed = json.loads(content)
+        if isinstance(parsed, list) and len(parsed) > 0 and \
+                all(isinstance(msg, dict) and "role" in msg for msg in parsed):
+            return True, parsed
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return False, None
 
-        from mem0 import Memory
-        print("[mcp_server] Initializing mem0 (creates Qdrant collections)...", flush=True)
-        print(f"[mcp_server] CONFIG: {json.dumps(CONFIG, default=str, indent=2)}", flush=True)
-        print(f"[mcp_server] MEM0_TELEMETRY env: {os.environ.get('MEM0_TELEMETRY', 'NOT SET')}", flush=True)
-        _memory = Memory.from_config(CONFIG)
-        print("[mcp_server] ✅ mem0 initialized", flush=True)
 
-        # Verify the collection was created with correct dims
-        # If not, delete it and recreate by calling create_col directly
+def _check_and_fix_collection_dims(qdrant_base: str, embed_dims: int) -> List[str]:
+    """Check Qdrant collections for dimension mismatches and delete stale ones.
+
+    Returns a list of action strings for logging (e.g., "mem0 OK (768)",
+    "mem0 Deleted (was 1024)"). If Qdrant is not reachable, returns empty
+    list — this is not an error, mem0 will handle collection creation.
+
+    Extracted from init_memory() so it can be tested with just Qdrant,
+    without needing to initialize the full mem0 stack.
+    """
+    actions: List[str] = []
+    for col_name in ("mem0", "mem0migrations"):
         try:
-            resp = urllib.request.urlopen(f"{qdrant_base}/collections/mem0", timeout=5)
-            data = _json.loads(resp.read())
-            vectors = data.get("result", {}).get("config", {}).get("params", {}).get("vectors", {})
-            actual_dim = None
+            resp = urllib.request.urlopen(
+                f"{qdrant_base}/collections/{col_name}", timeout=5)
+            data = json.loads(resp.read())
+            vectors = (
+                data.get("result", {})
+                .get("config", {})
+                .get("params", {})
+                .get("vectors", {})
+            )
+            existing_dim = None
             if isinstance(vectors, dict):
                 for key, val in vectors.items():
                     if isinstance(val, dict) and "size" in val:
-                        actual_dim = val["size"]
+                        existing_dim = val["size"]
                         break
-                if actual_dim is None and "size" in vectors:
-                    actual_dim = vectors["size"]
-            if actual_dim is not None:
-                if actual_dim == embed_dims:
-                    print(f"[mcp_server] ✅ Qdrant collection 'mem0' has correct dims: {actual_dim}", flush=True)
-                else:
-                    print(f"[mcp_server] ❌ Qdrant collection 'mem0' has {actual_dim} dims, "
-                          f"expected {embed_dims}. Deleting and recreating...", flush=True)
-                    # Delete the wrong collection
-                    req = urllib.request.Request(f"{qdrant_base}/collections/mem0", method="DELETE")
-                    urllib.request.urlopen(req, timeout=10)
-                    # Force mem0 to recreate it with correct dims
-                    _memory.vector_store.create_col(embed_dims, False)
-                    # Verify again
-                    resp2 = urllib.request.urlopen(f"{qdrant_base}/collections/mem0", timeout=5)
-                    data2 = _json.loads(resp2.read())
-                    vectors2 = data2.get("result", {}).get("config", {}).get("params", {}).get("vectors", {})
-                    new_dim = None
-                    if isinstance(vectors2, dict):
-                        for key, val in vectors2.items():
-                            if isinstance(val, dict) and "size" in val:
-                                new_dim = val["size"]
-                                break
-                    if new_dim == embed_dims:
-                        print(f"[mcp_server] ✅ Fixed! Collection 'mem0' now has {new_dim} dims", flush=True)
-                    else:
-                        print(f"[mcp_server] ❌ Still wrong: {new_dim} dims. Writes will fail!", flush=True)
+                if existing_dim is None and "size" in vectors:
+                    existing_dim = vectors["size"]
+            if existing_dim is not None and existing_dim != embed_dims:
+                print(f"[mcp_server] ⚠️  Collection '{col_name}' has "
+                      f"{existing_dim} dims, embedder needs {embed_dims}. "
+                      f"Deleting...", flush=True)
+                req = urllib.request.Request(
+                    f"{qdrant_base}/collections/{col_name}",
+                    method="DELETE",
+                )
+                urllib.request.urlopen(req, timeout=10)
+                print(f"[mcp_server] ✅ Deleted stale collection "
+                      f"'{col_name}'", flush=True)
+                actions.append(f"{col_name} Deleted (was {existing_dim})")
+            elif existing_dim is not None:
+                print(f"[mcp_server] ✅ Collection '{col_name}' dims OK "
+                      f"({existing_dim})", flush=True)
+                actions.append(f"{col_name} OK ({existing_dim})")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                pass  # Collection doesn't exist yet — that's fine
+        except Exception:
+            pass  # Qdrant not ready yet — mem0 will handle it
+    return actions
+
+def init_memory() -> Any:
+    """Eagerly initialize Memory — creates Qdrant collections on startup.
+    Also checks for and fixes dimension mismatches before init.
+
+    Updates the module-level _init_status: "initializing" → "ready" or "error".
+    Safe to call from a background thread."""
+    global _memory, _init_status, _init_error
+    if _memory is None:
+        _init_status = "initializing"
+        try:
+            embed_dims = CONFIG["vector_store"]["config"]["embedding_model_dims"]
+            qdrant_host = CONFIG["vector_store"]["config"]["host"]
+            qdrant_port = CONFIG["vector_store"]["config"]["port"]
+            qdrant_base = f"http://{qdrant_host}:{qdrant_port}"
+
+            # Check existing collections for dimension mismatches (extracted for testability)
+            _check_and_fix_collection_dims(qdrant_base, embed_dims)
+
+            from mem0 import Memory
+            print("[mcp_server] Initializing mem0 (creates Qdrant collections)...", flush=True)
+            print(f"[mcp_server] CONFIG: {json.dumps(CONFIG, default=str, indent=2)}", flush=True)
+            print(f"[mcp_server] MEM0_TELEMETRY env: {os.environ.get('MEM0_TELEMETRY', 'NOT SET')}", flush=True)
+            _memory = Memory.from_config(CONFIG)
+            print("[mcp_server] ✅ mem0 initialized", flush=True)
+
+            _init_status = "ready"
+            _init_error = None
         except Exception as e:
-            print(f"[mcp_server] Could not verify Qdrant collection: {e}", flush=True)
+            _init_status = "error"
+            _init_error = str(e)
+            print(f"[mcp_server] ❌ init_memory failed: {e}", flush=True)
+            # Re-raise so callers (e.g. selftest) see the failure
+            raise
 
     return _memory
 
@@ -276,13 +338,24 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "search_memories",
-        "description": "Semantic search across stored memories. Returns the most relevant memories.",
+        "description": "Semantic search across stored memories. Returns the most relevant memories, "
+                       "optionally filtered by relevance score.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Natural language search query"},
                 "user_id": {"type": "string", "default": DEFAULT_USER_ID},
                 "limit": {"type": "integer", "default": 10, "description": "Max results"},
+                "min_score": {
+                    "type": "number", "default": 0.0,
+                    "description": "Minimum relevance score (0.0–1.0). Results below this are filtered out. "
+                                   "Set to 0.0 (default) to include all results.",
+                },
+                "include_scores": {
+                    "type": "boolean", "default": True,
+                    "description": "If true (default), include a 'score' field in each result with "
+                                   "the cosine similarity from Qdrant.",
+                },
             },
             "required": ["query"],
         },
@@ -351,6 +424,61 @@ TOOL_DEFINITIONS = [
             "required": ["user_id"],
         },
     },
+    {
+        "name": "export_memories",
+        "description": "Export all memories for a user as JSON or CSV. "
+                       "Returns the exported data directly in the response text.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string", "default": DEFAULT_USER_ID},
+                "format": {
+                    "type": "string", "enum": ["json", "csv"], "default": "json",
+                    "description": "Output format: 'json' (default) or 'csv'",
+                },
+            },
+        },
+    },
+    {
+        "name": "import_memories",
+        "description": "Import memories from a JSON array (as exported by export_memories). "
+                       "Skips duplicates by checking if memory text already exists for the user.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "string",
+                    "description": "JSON string of memory array. Each item should have 'memory' (text) "
+                                   "and optionally 'metadata', 'user_id'.",
+                },
+                "user_id": {"type": "string", "default": DEFAULT_USER_ID},
+            },
+            "required": ["data"],
+        },
+    },
+    {
+        "name": "prune_memories",
+        "description": "Delete memories older than a specified number of days. "
+                       "By default runs in dry-run mode (reports only, no deletion).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string", "default": DEFAULT_USER_ID},
+                "older_than_days": {
+                    "type": "integer", "default": 30,
+                    "description": "Delete memories older than this many days",
+                },
+                "dry_run": {
+                    "type": "boolean", "default": True,
+                    "description": "If true (default), only report what would be deleted without deleting",
+                },
+                "min_score": {
+                    "type": "number",
+                    "description": "Optional: only prune memories with a relevance score below this threshold",
+                },
+            },
+        },
+    },
 ]
 
 # ── Error handling ──────────────────────────────────────────────────────────
@@ -388,7 +516,6 @@ class OllamaError(Mem0Error):
 
 def _check_ollama():
     """Verify Ollama is reachable. Raises OllamaError if not."""
-    import urllib.request
     try:
         urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=5)
     except Exception as e:
@@ -401,7 +528,6 @@ def _check_ollama():
 
 def _check_qdrant():
     """Verify Qdrant is reachable. Raises QdrantError if not."""
-    import urllib.request
     try:
         urllib.request.urlopen(QDRANT_URL, timeout=5)
     except Exception as e:
@@ -410,6 +536,118 @@ def _check_qdrant():
             detail=f"{QDRANT_URL} — {e}",
             fix="Start Qdrant: 'docker compose up -d qdrant'",
         )
+
+
+def _ollama_reachable() -> bool:
+    """Check if Ollama is reachable (non-raising). For health endpoint."""
+    try:
+        urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=3)
+        return True
+    except Exception:
+        return False
+
+
+def _qdrant_reachable() -> bool:
+    """Check if Qdrant is reachable (non-raising). For health endpoint."""
+    try:
+        urllib.request.urlopen(QDRANT_URL, timeout=3)
+        return True
+    except Exception:
+        return False
+
+
+def _mem0_ready() -> bool:
+    """Check if mem0 is initialized and ready (non-raising). For health endpoint."""
+    return _memory is not None and _init_status == "ready"
+
+
+def _build_health_response() -> dict:
+    """Build the health response dict. Used by the /health HTTP endpoint
+    and directly by tests. This is extracted so tests can check health
+    without making HTTP requests."""
+    ollama_ok = _ollama_reachable()
+    qdrant_ok = _qdrant_reachable()
+    mem0_ok = _mem0_ready()
+
+    if _init_status == "ready" and ollama_ok and qdrant_ok and mem0_ok:
+        status = "ok"
+    elif _init_status in ("starting", "initializing"):
+        status = "starting"
+    else:
+        status = "degraded"
+
+    if ollama_ok:
+        model_status = _ping_llm_model()
+    else:
+        model_status = "unreachable"
+
+    return {
+        "status": status,
+        "init_status": _init_status,
+        "components": {
+            "ollama": ollama_ok,
+            "qdrant": qdrant_ok,
+            "mem0": mem0_ok,
+        },
+        "model_status": model_status,
+        "server": "mem0-local",
+        "tools": len(TOOL_DEFINITIONS),
+        "config": {
+            "llm": CONFIG["llm"]["config"]["model"],
+            "embedder": CONFIG["embedder"]["config"]["model"],
+            "vector_store": "qdrant",
+        },
+    }
+
+
+def _ping_llm_model() -> str:
+    """Lightweight LLM ping to check if the configured model is loaded and responsive.
+
+    Sends a minimal request to Ollama /api/generate with a tiny prompt ("hi")
+    and 1 token max. Cached for 30 seconds to avoid pinging on every health check.
+
+    Returns:
+        "loaded"     — model responded successfully
+        "unloaded"   — model not found (needs ollama pull)
+        "unreachable"— Ollama is down or request timed out
+    """
+
+    with _llm_ping_lock:
+        now = time.monotonic()
+        cached_status = _llm_ping_cache.get("status")
+        cached_at = _llm_ping_cache.get("checked_at", 0.0)
+        if cached_status is not None and (now - cached_at) < _LLM_PING_CACHE_TTL:
+            return cached_status
+
+        model = CONFIG["llm"]["config"]["model"]
+        try:
+            req_body = json.dumps({
+                "model": model,
+                "prompt": "hi",
+                "stream": False,
+                "options": {"num_predict": 1},
+            }).encode()
+            req = urllib.request.Request(
+                f"{OLLAMA_URL}/api/generate",
+                data=req_body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=5)
+            status = "loaded"
+        except urllib.error.HTTPError as e:
+            # 404 = model not found
+            if e.code == 404:
+                status = "unloaded"
+            else:
+                # Other HTTP errors — treat as unreachable
+                status = "unreachable"
+        except Exception:
+            status = "unreachable"
+
+        _llm_ping_cache["status"] = status
+        _llm_ping_cache["checked_at"] = now
+        return status
 
 
 def _diagnose_llm_failure(m, model_name: str) -> str:
@@ -477,13 +715,7 @@ def execute_tool(name: str, arguments: dict) -> dict:
         chunk_errors = []
 
         # Detect conversation messages (JSON array of {role, content} dicts)
-        is_conversation = False
-        try:
-            parsed_json = json.loads(content)
-            if isinstance(parsed_json, list) and all(isinstance(msg, dict) and "role" in msg for msg in parsed_json):
-                is_conversation = True
-        except (json.JSONDecodeError, TypeError):
-            pass
+        is_conversation, parsed_json = _detect_conversation(content)
 
         def _do_add(text, user_id, meta, use_infer):
             """Call m.add() with LLM response logging for diagnostics."""
@@ -594,9 +826,38 @@ def execute_tool(name: str, arguments: dict) -> dict:
         query = arguments.get("query", "")
         if not query or not query.strip():
             raise Mem0Error("Search query cannot be empty.", tool=name)
+        min_score = arguments.get("min_score", 0.0)
+        include_scores = arguments.get("include_scores", True)
         try:
-            return m.search(query, filters={"user_id": uid},
-                            limit=arguments.get("limit", 10))
+            raw_results = m.search(query, filters={"user_id": uid},
+                                   limit=arguments.get("limit", 10))
+            # Normalize: mem0 may return a list or a dict with "results"
+            results_list = raw_results if isinstance(raw_results, list) else raw_results.get("results", [])
+
+            # Enrich each result with a score field and filter by min_score
+            enriched: List[dict] = []
+            for mem in results_list:
+                if not isinstance(mem, dict):
+                    continue
+                # mem0 search results may contain a "score" field from Qdrant
+                score = mem.get("score")
+                if score is None:
+                    score = None
+
+                # Apply min_score filter
+                if min_score and score is not None and score < min_score:
+                    continue
+
+                if include_scores:
+                    if "score" not in mem:
+                        mem["score"] = score
+                    enriched.append(mem)
+                else:
+                    # Strip score if include_scores is false
+                    mem.pop("score", None)
+                    enriched.append(mem)
+
+            return enriched
         except Exception as e:
             err_str = str(e)
             if "dimension" in err_str.lower():
@@ -691,6 +952,182 @@ def execute_tool(name: str, arguments: dict) -> dict:
             raise Mem0Error(f"Failed to delete entity '{target_user}'.",
                             tool=name, detail=str(e))
 
+    # ── export_memories ────────────────────────────────────────────────────
+    elif name == "export_memories":
+        fmt = arguments.get("format", "json")
+        if fmt not in ("json", "csv"):
+            raise Mem0Error(f"Invalid format '{fmt}'. Use 'json' or 'csv'.", tool=name)
+        try:
+            all_mems = m.get_all(filters={"user_id": uid}, limit=10000)
+            results_list = all_mems if isinstance(all_mems, list) else all_mems.get("results", [])
+
+            # Normalize each memory to a clean export record
+            export_records: List[dict] = []
+            for mem in results_list:
+                if not isinstance(mem, dict):
+                    continue
+                export_records.append({
+                    "id": mem.get("id") or mem.get("memory_id", ""),
+                    "memory": mem.get("memory", ""),
+                    "metadata": mem.get("metadata", {}),
+                    "created_at": mem.get("created_at", ""),
+                    "user_id": mem.get("user_id", uid),
+                })
+
+            if fmt == "json":
+                return {"format": "json", "count": len(export_records),
+                        "user_id": uid, "memories": export_records}
+            else:
+                # CSV output
+                output = io.StringIO()
+                writer = csv.DictWriter(output, fieldnames=["id", "memory", "metadata", "created_at", "user_id"])
+                writer.writeheader()
+                for rec in export_records:
+                    writer.writerow({
+                        "id": rec["id"],
+                        "memory": rec["memory"],
+                        "metadata": json.dumps(rec["metadata"]) if rec["metadata"] else "",
+                        "created_at": rec["created_at"],
+                        "user_id": rec["user_id"],
+                    })
+                return {"format": "csv", "count": len(export_records),
+                        "user_id": uid, "data": output.getvalue()}
+        except Exception as e:
+            raise Mem0Error(f"Failed to export memories for user '{uid}'.",
+                            tool=name, detail=str(e))
+
+    # ── import_memories ─────────────────────────────────────────────────────
+    elif name == "import_memories":
+        data_str = arguments.get("data", "")
+        if not data_str or not data_str.strip():
+            raise Mem0Error("data is required (JSON string of memory array).", tool=name)
+
+        try:
+            parsed = json.loads(data_str)
+        except (json.JSONDecodeError, TypeError) as e:
+            raise Mem0Error("data is not valid JSON.", tool=name, detail=str(e),
+                            fix="Provide a JSON array exported by export_memories.")
+
+        if not isinstance(parsed, list):
+            raise Mem0Error("data must be a JSON array of memory objects.", tool=name)
+
+        imported = 0
+        skipped = 0
+        failed = 0
+        errors: List[str] = []
+
+        # Fetch existing memory texts for duplicate detection
+        try:
+            existing_mems = m.get_all(filters={"user_id": uid}, limit=10000)
+            existing_list = existing_mems if isinstance(existing_mems, list) else existing_mems.get("results", [])
+            existing_texts = set()
+            for mem in existing_list:
+                if isinstance(mem, dict):
+                    text = mem.get("memory", "")
+                    if text:
+                        existing_texts.add(text.strip().lower())
+        except Exception:
+            existing_texts = set()
+
+        for item in parsed:
+            if not isinstance(item, dict):
+                failed += 1
+                errors.append(f"Non-dict item skipped: {type(item).__name__}")
+                continue
+            mem_text = item.get("memory", "") or item.get("text", "") or item.get("content", "")
+            if not mem_text or not mem_text.strip():
+                failed += 1
+                errors.append("Empty memory text, skipped")
+                continue
+
+            # Skip duplicates (case-insensitive comparison)
+            if mem_text.strip().lower() in existing_texts:
+                skipped += 1
+                continue
+
+            try:
+                mem_metadata = item.get("metadata")
+                m.add(mem_text, user_id=uid, metadata=mem_metadata, infer=False)
+                existing_texts.add(mem_text.strip().lower())
+                imported += 1
+            except Exception as e:
+                failed += 1
+                errors.append(f"Failed to import: {e}")
+
+        return {
+            "imported": imported,
+            "skipped": skipped,
+            "failed": failed,
+            "errors": errors if errors else None,
+            "user_id": uid,
+        }
+
+    # ── prune_memories ──────────────────────────────────────────────────────
+    elif name == "prune_memories":
+        older_than_days = arguments.get("older_than_days", 30)
+        dry_run = arguments.get("dry_run", True)
+        min_score = arguments.get("min_score")
+
+        try:
+            all_mems = m.get_all(filters={"user_id": uid}, limit=10000)
+            results_list = all_mems if isinstance(all_mems, list) else all_mems.get("results", [])
+        except Exception as e:
+            raise Mem0Error("Failed to list memories for pruning.", tool=name, detail=str(e))
+
+        cutoff = time.time() - (older_than_days * 86400)
+        to_prune: List[dict] = []
+
+        for mem in results_list:
+            if not isinstance(mem, dict):
+                continue
+
+            # Determine the memory's age from created_at
+            created_at = mem.get("created_at", "")
+            mem_age = None
+            if created_at:
+                # Try ISO 8601 parsing
+                try:
+                    import datetime as _dt
+                    if "T" in str(created_at):
+                        mem_age = _dt.datetime.fromisoformat(str(created_at).replace("Z", "+00:00")).timestamp()
+                    else:
+                        # Try as a unix timestamp or date string
+                        mem_age = float(created_at)
+                except (ValueError, TypeError):
+                    pass
+
+            if mem_age is not None and mem_age < cutoff:
+                # Apply optional min_score filter
+                if min_score is not None:
+                    score = mem.get("score")
+                    if score is not None and score > min_score:
+                        continue
+
+                to_prune.append({
+                    "id": mem.get("id") or mem.get("memory_id", ""),
+                    "memory": mem.get("memory", "")[:200],
+                    "created_at": created_at,
+                })
+
+        deleted_count = 0
+        if not dry_run:
+            for item in to_prune:
+                mem_id = item.get("id")
+                if not mem_id:
+                    continue
+                try:
+                    m.delete(mem_id)
+                    deleted_count += 1
+                except Exception as e:
+                    print(f"[prune_memories] Failed to delete {mem_id}: {e}", file=sys.stderr)
+
+        return {
+            "would_delete": len(to_prune),
+            "deleted": deleted_count,
+            "dry_run": dry_run,
+            "memories": to_prune,
+        }
+
     else:
         raise Mem0Error(f"Unknown tool: {name}", tool=name)
 
@@ -736,16 +1173,8 @@ async def http_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
 
         # Health check — respond immediately, even if LLM calls are in progress
         if method == "GET" and path == "/health":
-            response = json.dumps({
-                "status": "ok",
-                "server": "mem0-local",
-                "tools": len(TOOL_DEFINITIONS),
-                "config": {
-                    "llm": CONFIG["llm"]["config"]["model"],
-                    "embedder": CONFIG["embedder"]["config"]["model"],
-                    "vector_store": "qdrant",
-                },
-            }).encode()
+            health = _build_health_response()
+            response = json.dumps(health).encode()
             header = (
                 f"HTTP/1.1 200 OK\r\n"
                 f"Content-Type: application/json\r\n"
@@ -828,13 +1257,13 @@ async def http_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
             pass
 
 
-def handle_mcp_request_sync(request: dict) -> dict | None:
+def handle_mcp_request_sync(request: dict) -> Optional[dict]:
     """Synchronous MCP request handler — called from a worker thread
     so long LLM calls don't block the async event loop."""
     return _handle_mcp_request(request)
 
 
-def _handle_mcp_request(request: dict) -> dict | None:
+def _handle_mcp_request(request: dict) -> Optional[dict]:
     """Sync version of the MCP request handler. Runs in a thread so it
     doesn't block the event loop during long LLM calls."""
     req_id = request.get("id")
@@ -918,9 +1347,13 @@ def _handle_mcp_request(request: dict) -> dict | None:
 
 
 async def main():
-    # Eagerly initialize mem0 — creates Qdrant collections before accepting requests
-    # This prevents "Collection doesn't exist" errors on the first tool call
-    init_memory()
+    # Start mem0 initialization in a background thread so the HTTP server
+    # starts immediately. The health endpoint reports _init_status so the
+    # Docker healthcheck can distinguish "still loading" from "ready".
+    # This prevents the container from being marked unhealthy when the first
+    # run pulls models (which can take >300s).
+    init_thread = threading.Thread(target=init_memory, daemon=True, name="mem0-init")
+    init_thread.start()
 
     server = await asyncio.start_server(http_handler, MCP_HOST, MCP_PORT)
     print(f"mem0-local MCP server listening on {MCP_HOST}:{MCP_PORT}", flush=True)
@@ -930,6 +1363,7 @@ async def main():
     print(f"  Tools:    {len(TOOL_DEFINITIONS)}", flush=True)
     print(f"  Health:   GET  http://{MCP_HOST}:{MCP_PORT}/health", flush=True)
     print(f"  MCP:      POST http://{MCP_HOST}:{MCP_PORT}/mcp", flush=True)
+    print(f"  Init:     running in background (health reports 'starting' until ready)", flush=True)
     async with server:
         await server.serve_forever()
 

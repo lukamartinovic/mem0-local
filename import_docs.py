@@ -19,6 +19,14 @@ import time
 import urllib.request
 import urllib.error
 from pathlib import Path
+from typing import List
+
+# Reuse chunking logic from mcp_server — single source of truth.
+# import_docs.py runs on the host (not in Docker), so mcp_server must be importable.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import mcp_server
+_chunk_text = mcp_server._chunk_text
+_get_chunk_size = mcp_server._get_chunk_size
 
 MCP_URL = "http://localhost:8765/mcp"
 HEALTH_URL = "http://localhost:8765/health"
@@ -28,29 +36,6 @@ GREEN = "\033[0;32m"
 RED = "\033[0;31m"
 YELLOW = "\033[1;33m"
 NC = "\033[0m"
-
-# ── Model-specific chunk sizes ──────────────────────────────────────────────
-MODEL_CHUNK_SIZES = {
-    "qwen2.5:3b": 1500,
-    "qwen2.5:7b": 3000,
-    "qwen3.5:9b": 4000,
-    "gemma4:12b": 5000,
-    "qwen3.5:27b": 8000,
-}
-
-def get_chunk_size(model: str) -> int:
-    """Get the chunk size for a given model."""
-    # Exact match first
-    if model in MODEL_CHUNK_SIZES:
-        return MODEL_CHUNK_SIZES[model]
-    # Prefix match: find the most specific (longest) matching key
-    best_match = None
-    best_len = 0
-    for key, size in MODEL_CHUNK_SIZES.items():
-        if model.startswith(key) and len(key) > best_len:
-            best_match = size
-            best_len = len(key)
-    return best_match if best_match is not None else 3000
 
 
 # ── HTTP client ──────────────────────────────────────────────────────────────
@@ -148,51 +133,9 @@ def add_memory(content: str, user_id: str, metadata: dict, req_id: int) -> bool:
         return False
 
 
-# ── Chunking ─────────────────────────────────────────────────────────────────
-
-def chunk_text(text: str, max_chars: int = 3000, context_header: str = "") -> list[str]:
-    """Split text into chunks at paragraph boundaries, each under max_chars.
-    If context_header is provided, it's prepended to each chunk."""
-    header_len = len(context_header) + 2 if context_header else 0
-    if len(text) + header_len <= max_chars:
-        return [text] if not context_header else [context_header + "\n\n" + text]
-
-    header_len = len(context_header) + 2 if context_header else 0
-    effective_max = max_chars - header_len
-
-    chunks = []
-    paragraphs = text.split("\n\n")
-    current = ""
-
-    for para in paragraphs:
-        if len(current) + len(para) + 2 > effective_max:
-            if current:
-                chunks.append(current)
-            if len(para) > effective_max:
-                for line in para.split("\n"):
-                    if len(current) + len(line) + 1 > effective_max:
-                        if current:
-                            chunks.append(current)
-                        current = line
-                    else:
-                        current = (current + "\n" + line) if current else line
-            else:
-                current = para
-        else:
-            current = (current + "\n\n" + para) if current else para
-
-    if current:
-        chunks.append(current)
-
-    if context_header:
-        chunks = [context_header + "\n\n" + chunk for chunk in chunks]
-
-    return chunks
-
-
 # ── File discovery ───────────────────────────────────────────────────────────
 
-def find_md_files(directory: str) -> list[Path]:
+def find_md_files(directory: str) -> List[Path]:
     path = Path(directory)
     if not path.exists():
         print(f"{RED}Error:{NC} '{directory}' does not exist")
@@ -252,14 +195,14 @@ Examples:
 
     print(f"Found {len(files)} markdown files in {args.directory}")
     print(f"User ID: {args.user_id}")
-    print(f"Chunk size: {get_chunk_size(args.llm_model):,} chars (model: {args.llm_model})")
+    print(f"Chunk size: {_get_chunk_size(args.llm_model):,} chars (model: {args.llm_model})")
     print()
 
     if args.dry_run:
         for f in files:
             size = f.stat().st_size
-            chunks = chunk_text(f.read_text(encoding="utf-8", errors="replace"),
-                               get_chunk_size(args.llm_model))
+            chunks = _chunk_text(f.read_text(encoding="utf-8", errors="replace"),
+                               _get_chunk_size(args.llm_model))
             chunk_info = f" → {len(chunks)} chunks" if len(chunks) > 1 else ""
             print(f"  {f.relative_to(args.directory)}  ({size:,} bytes){chunk_info}")
         print(f"\n{YELLOW}Dry run{NC} — {len(files)} files would be imported.")
@@ -285,9 +228,9 @@ Examples:
             "repo": args.user_id,
         }
 
-        chunk_size = get_chunk_size(args.llm_model)
+        chunk_size = _get_chunk_size(args.llm_model)
         context_header = f"[Document: {rel_path}][Source: docs_import]"
-        chunks = chunk_text(content, max_chars=chunk_size, context_header=context_header)
+        chunks = _chunk_text(content, max_chars=chunk_size, context_header=context_header)
 
         if len(chunks) == 1:
             print(f"  [{i+1}/{len(files)}] → {rel_path}  ({len(content):,} chars)", end="", flush=True)

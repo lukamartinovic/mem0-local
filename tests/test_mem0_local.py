@@ -104,7 +104,7 @@ class TestInfrastructure:
         assert resp.status == 200
         data = json.loads(resp.read())
         assert data["status"] == "ok"
-        assert data["tools"] == 9
+        assert data["tools"] == 12
         print(f"  Server config: {data['config']}")
 
 
@@ -123,11 +123,12 @@ class TestMCPProtocol:
     def test_list_tools(self):
         resp = mcp_call("tools/list")
         tools = resp["result"]["tools"]
-        assert len(tools) == 9
+        assert len(tools) == 12
         names = {t["name"] for t in tools}
         expected = {"add_memory", "search_memories", "get_memories",
                     "get_memory", "update_memory", "delete_memory",
-                    "delete_all_memories", "list_entities", "delete_entities"}
+                    "delete_all_memories", "list_entities", "delete_entities",
+                    "export_memories", "import_memories", "prune_memories"}
         assert names == expected, f"Missing tools: {expected - names}"
 
 

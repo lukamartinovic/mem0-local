@@ -6,3 +6,4 @@ qdrant_data/
 .venv/
 .pytest_cache/
 *.egg-info/
+*.html

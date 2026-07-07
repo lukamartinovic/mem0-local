@@ -23,7 +23,9 @@ services:
       - "8765:8765"
     environment:
       MEM0_TELEMETRY: "False"
-      MEM0_OLLAMA_URL: http://host.docker.internal:11434
+      # Ollama URL — set MEM0_OLLAMA_URL in .env to use an external provider
+      # (e.g., Ollama on company VPN). Default: host.docker.internal (local).
+      MEM0_OLLAMA_URL: ${MEM0_OLLAMA_URL:-http://host.docker.internal:11434}
       MEM0_QDRANT_HOST: qdrant
       MEM0_QDRANT_PORT: "6333"
       MEM0_LLM_MODEL: ${MEM0_LLM_MODEL:-qwen2.5:7b}
@@ -38,11 +40,11 @@ services:
       qdrant:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8765/health', timeout=10)"]
+      test: ["CMD", "python3", "-c", "import urllib.request,json; d=json.loads(urllib.request.urlopen('http://localhost:8765/health',timeout=10).read()); exit(0 if d.get('status')=='ok' else 1)"]
       interval: 15s
       timeout: 10s
       retries: 5
-      start_period: 300s
+      start_period: 600s
 
 volumes:
   qdrant_data:

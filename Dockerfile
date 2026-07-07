@@ -27,8 +27,10 @@ ENV MEM0_OLLAMA_URL=http://host.docker.internal:11434 \
 
 EXPOSE 8765
 
-# Health check — the server exposes /health
-HEALTHCHECK --interval=10s --timeout=5s --retries=3 --start-period=30s \
-    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8765/health', timeout=5)" || exit 1
+# Health check — the server exposes /health with status field
+# Checks for status=="ok" (not just HTTP 200) so the container is marked
+# unhealthy while mem0 is still initializing.
+HEALTHCHECK --interval=10s --timeout=10s --retries=5 --start-period=600s \
+    CMD python3 -c "import urllib.request,json; d=json.loads(urllib.request.urlopen('http://localhost:8765/health',timeout=10).read()); exit(0 if d.get('status')=='ok' else 1)" || exit 1
 
 CMD ["./entrypoint.sh"]

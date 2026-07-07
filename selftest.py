@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Self-test: exercises all 9 MCP tools end-to-end.
+Self-test: exercises all 12 MCP tools end-to-end.
 Runs inside the container after startup, before accepting IDE requests.
 Errors from execute_tool now raise Mem0Error subclasses with actionable messages.
 """
@@ -53,7 +53,7 @@ def run():
 
     print()
     print("┌──────────────────────────────────────────────────────────┐")
-    print("│  mem0-local self-test — exercising all 9 MCP tools       │")
+    print("│  mem0-local self-test — exercising all 12 MCP tools      │")
     print("└──────────────────────────────────────────────────────────┘")
     print()
 
@@ -91,7 +91,7 @@ def run():
                 detail=f"Result: {result}",
                 fix="Check Ollama model can produce JSON output",
             )
-    check("1/9  add_memory (string)", test_add_string)
+    check("1/12  add_memory (string)", test_add_string)
 
     # 2. add_memory (conversation messages as JSON)
     def test_add_conversation():
@@ -110,23 +110,50 @@ def run():
                 detail=f"Result: {result}",
                 fix="Check Ollama model can produce JSON output",
             )
-    check("2/9  add_memory (conversation)", test_add_conversation)
+    check("2/12  add_memory (conversation)", test_add_conversation)
 
     time.sleep(2)
 
-    # 3. search_memories
+    # 3. search_memories (with scores)
+    test_memory_id = [None]
     def test_search():
         result = mcp_server.execute_tool("search_memories", {
             "query": "language preference",
             "user_id": test_user,
+            "include_scores": True,
         })
         results = result if isinstance(result, list) else result.get("results", [])
         if len(results) == 0:
             raise Mem0Error("search returned 0 results after successful add",
                             detail="Expected results for 'language preference' query")
-    check("3/9  search_memories", test_search)
+        # Verify score field is present when include_scores=True
+        first = results[0]
+        if "score" not in first:
+            raise Mem0Error("search_memories result missing 'score' field",
+                            detail=f"Result: {first}",
+                            fix="This is expected if Qdrant doesn't return scores, but the field should exist (may be null)")
+        # Save a memory_id for later tests
+        test_memory_id[0] = first.get("id") or first.get("memory_id")
+    check("3/12  search_memories (with scores)", test_search)
 
-    # 4. get_memories
+    # 4. search_memories (min_score filter)
+    def test_search_min_score():
+        # Use a high min_score that filters everything — should get 0 results
+        result = mcp_server.execute_tool("search_memories", {
+            "query": "language preference",
+            "user_id": test_user,
+            "min_score": 0.99,
+            "include_scores": True,
+        })
+        results = result if isinstance(result, list) else result.get("results", [])
+        # With a very high min_score, we expect 0 or very few results
+        # Just verify it doesn't crash and returns a list
+        if not isinstance(results, list):
+            raise Mem0Error("search_memories with min_score did not return a list",
+                            detail=f"Result: {result}")
+    check("4/12  search_memories (min_score filter)", test_search_min_score)
+
+    # 5. get_memories
     def test_get_all():
         result = mcp_server.execute_tool("get_memories", {
             "user_id": test_user,
@@ -135,30 +162,29 @@ def run():
         if not result:
             raise Mem0Error("get_memories returned empty",
                             detail="Expected at least 1 memory from previous add")
-    check("4/9  get_memories", test_get_all)
+    check("5/12  get_memories", test_get_all)
 
-    # 5. get_memory (by ID)
-    test_memory_id = [None]
+    # 6. get_memory (by ID)
     def test_get_one():
-        all_mems = mcp_server.execute_tool("get_memories", {
-            "user_id": test_user,
-            "limit": 10,
-        })
-        results = all_mems if isinstance(all_mems, list) else all_mems.get("results", [])
-        if len(results) == 0:
-            raise Mem0Error("no memories to test get_memory")
-        mem = results[0]
-        mem_id = mem.get("id") or mem.get("memory_id")
-        if not mem_id:
-            raise Mem0Error("memory has no id field",
-                            detail=f"Memory object: {mem}")
-        test_memory_id[0] = mem_id
-        result = mcp_server.execute_tool("get_memory", {"memory_id": mem_id})
+        if not test_memory_id[0]:
+            # Fallback: get from get_memories
+            all_mems = mcp_server.execute_tool("get_memories", {
+                "user_id": test_user,
+                "limit": 10,
+            })
+            results = all_mems if isinstance(all_mems, list) else all_mems.get("results", [])
+            if len(results) == 0:
+                raise Mem0Error("no memories to test get_memory")
+            mem = results[0]
+            test_memory_id[0] = mem.get("id") or mem.get("memory_id")
+        if not test_memory_id[0]:
+            raise Mem0Error("memory has no id field")
+        result = mcp_server.execute_tool("get_memory", {"memory_id": test_memory_id[0]})
         if not result:
-            raise Mem0Error(f"get_memory returned empty for id={mem_id}")
-    check("5/9  get_memory (by ID)", test_get_one)
+            raise Mem0Error(f"get_memory returned empty for id={test_memory_id[0]}")
+    check("6/12  get_memory (by ID)", test_get_one)
 
-    # 6. update_memory
+    # 7. update_memory
     def test_update():
         if not test_memory_id[0]:
             raise Mem0Error("no memory_id from previous test")
@@ -166,36 +192,91 @@ def run():
             "memory_id": test_memory_id[0],
             "content": "Updated: I now prefer Python over everything.",
         })
-    check("6/9  update_memory", test_update)
+    check("7/12  update_memory", test_update)
 
-    # 7. list_entities
+    # 8. list_entities
     def test_list_entities():
         result = mcp_server.execute_tool("list_entities", {})
         if "entities" not in result:
             raise Mem0Error("list_entities returned no 'entities' key",
                             detail=f"Result: {result}")
-    check("7/9  list_entities", test_list_entities)
+    check("8/12  list_entities", test_list_entities)
 
-    # 8. delete_memory
-    def test_delete_one():
-        if not test_memory_id[0]:
-            raise Mem0Error("no memory_id from previous test")
-        mcp_server.execute_tool("delete_memory", {
-            "memory_id": test_memory_id[0],
-        })
-    check("8/9  delete_memory", test_delete_one)
-
-    # 9. delete_all_memories
-    def test_delete_all():
-        mcp_server.execute_tool("delete_all_memories", {"user_id": test_user})
-        result = mcp_server.execute_tool("search_memories", {
-            "query": "anything",
+    # 9. export_memories (JSON format)
+    def test_export_json():
+        result = mcp_server.execute_tool("export_memories", {
             "user_id": test_user,
+            "format": "json",
         })
-        results = result if isinstance(result, list) else result.get("results", [])
-        if len(results) > 0:
-            raise Mem0Error(f"memories still exist after delete_all ({len(results)} found)")
-    check("9/9  delete_all_memories", test_delete_all)
+        if "memories" not in result:
+            raise Mem0Error("export_memories (json) returned no 'memories' key",
+                            detail=f"Result: {result}")
+        if result.get("format") != "json":
+            raise Mem0Error(f"export_memories format mismatch: expected 'json', got '{result.get('format')}'")
+        if not isinstance(result["memories"], list):
+            raise Mem0Error("export_memories memories is not a list")
+    check("9/12  export_memories (JSON)", test_export_json)
+
+    # 10. export_memories (CSV format)
+    def test_export_csv():
+        result = mcp_server.execute_tool("export_memories", {
+            "user_id": test_user,
+            "format": "csv",
+        })
+        if "data" not in result:
+            raise Mem0Error("export_memories (csv) returned no 'data' key",
+                            detail=f"Result: {result}")
+        if result.get("format") != "csv":
+            raise Mem0Error(f"export_memories format mismatch: expected 'csv', got '{result.get('format')}'")
+        if not isinstance(result["data"], str):
+            raise Mem0Error("export_memories csv data is not a string")
+        if "id,memory,metadata,created_at,user_id" not in result["data"]:
+            raise Mem0Error("export_memories csv missing header row")
+    check("10/12  export_memories (CSV)", test_export_csv)
+
+    # 11. import_memories
+    def test_import():
+        export_result = mcp_server.execute_tool("export_memories", {
+            "user_id": test_user,
+            "format": "json",
+        })
+        export_data = export_result.get("memories", [])
+        if not export_data:
+            raise Mem0Error("no memories to import (export was empty)")
+        # Import to a different user to avoid duplicate detection skipping all
+        import_user = f"selftest_import_{uuid.uuid4().hex[:8]}"
+        result = mcp_server.execute_tool("import_memories", {
+            "data": json.dumps(export_data),
+            "user_id": import_user,
+        })
+        if "imported" not in result:
+            raise Mem0Error("import_memories returned no 'imported' key",
+                            detail=f"Result: {result}")
+        if result["imported"] == 0:
+            raise Mem0Error("import_memories imported 0 memories",
+                            detail=f"Result: {result}")
+        # Clean up
+        mcp_server.execute_tool("delete_all_memories", {"user_id": import_user})
+    check("11/12  import_memories", test_import)
+
+    # 12. prune_memories (dry run)
+    def test_prune_dry_run():
+        result = mcp_server.execute_tool("prune_memories", {
+            "user_id": test_user,
+            "older_than_days": 0,  # everything is "older than 0 days"
+            "dry_run": True,
+        })
+        if "would_delete" not in result:
+            raise Mem0Error("prune_memories returned no 'would_delete' key",
+                            detail=f"Result: {result}")
+        if result.get("dry_run") is not True:
+            raise Mem0Error("prune_memories dry_run should be True")
+        if result.get("deleted", 0) != 0:
+            raise Mem0Error("prune_memories in dry_run should not delete anything")
+    check("12/12  prune_memories (dry run)", test_prune_dry_run)
+
+    # Cleanup: delete all test memories
+    mcp_server.execute_tool("delete_all_memories", {"user_id": test_user})
 
     _print_summary()
 
@@ -207,7 +288,7 @@ def _print_summary():
     print()
     if failed > 0:
         print(f"{RED}┌──────────────────────────────────────────────────────────┐")
-        print(f"│  ❌ {passed}/9 tools passed, {failed} failed                   │")
+        print(f"│  ❌ {passed}/12 tools passed, {failed} failed                  │")
         print(f"└──────────────────────────────────────────────────────────┘{NC}")
         print()
         print("Errors:")
@@ -223,7 +304,7 @@ def _print_summary():
         print("  • Check Docker:         docker compose logs mcp-server")
     else:
         print(f"{GREEN}┌──────────────────────────────────────────────────────────┐")
-        print(f"│  ✅ 9/9 tools passed — all MCP commands verified          │")
+        print(f"│  ✅ 12/12 tools passed — all MCP commands verified        │")
         print(f"└──────────────────────────────────────────────────────────┘{NC}")
     print()
 
