@@ -260,10 +260,10 @@ if command -v sysctl &>/dev/null; then
   CPU_INFO=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "Apple Silicon")
 fi
 
-echo "Detected: ${CYAN}${RAM_GB}GB${NC} unified memory (${CPU_INFO})"
-echo ""
-
 # ── Model selection ─────────────────────────────────────────────────────────
+# Models that support tool calling (required by mem0 for JSON extraction)
+# Format: "name:size_gb description min_ram_gb"
+
 MODELS=(
   "qwen2.5:3b|1.9|Fastest, basic JSON extraction|8"
   "qwen2.5:7b|4.7|Reliable JSON extraction (recommended)|16"
@@ -274,54 +274,64 @@ MODELS=(
 
 DEFAULT_MODEL="qwen2.5:7b"
 
-echo "Select an LLM model for memory extraction:"
-echo ""
-
-idx=1
-for model_entry in "${MODELS[@]}"; do
-  IFS='|' read -r name size desc min_ram <<< "$model_entry"
-  marker=""
-  if [ "$RAM_GB" -lt "$min_ram" ]; then
-    marker="${RED}⚠ needs ${min_ram}GB${NC}"
-  else
-    marker="${GREEN}✓ ${min_ram}GB+ RAM${NC}"
-  fi
-  if [ "$name" = "$DEFAULT_MODEL" ]; then
-    echo -e "  ${CYAN}${idx}.${NC} ${name}  ${size}GB   ${desc}  ${marker} ${YELLOW}(default)${NC}"
-  else
-    echo -e "  ${CYAN}${idx}.${NC} ${name}  ${size}GB   ${desc}  ${marker}"
-  fi
-  idx=$((idx + 1))
-done
-
-echo ""
-read -rp "Choice [1-5] (default 2): " model_choice
-
-case "${model_choice:-2}" in
-  1) LLM_MODEL="qwen2.5:3b" ;;
-  2) LLM_MODEL="qwen2.5:7b" ;;
-  3) LLM_MODEL="qwen3.5:9b" ;;
-  4) LLM_MODEL="gemma4:12b" ;;
-  5) LLM_MODEL="qwen3.5:27b" ;;
-  *) LLM_MODEL="qwen2.5:7b" ;;
-esac
-
-info "Selected: ${CYAN}${LLM_MODEL}${NC}"
-
-# Save to .env (preserve existing customizations)
-if [ ! -f .env ]; then
-  echo "MEM0_LLM_MODEL=${LLM_MODEL}" > .env
-  echo "MEM0_EMBED_MODEL=${EMBED_MODEL}" >> .env
-  echo "MEM0_DEFAULT_USER_ID=dev" >> .env
+# If .env already has a model configured, skip the picker.
+# This makes ./setup.sh idempotent — run once to configure, run again to start.
+if [ -f .env ] && grep -q "^MEM0_LLM_MODEL=" .env; then
+  LLM_MODEL=$(grep "^MEM0_LLM_MODEL=" .env | cut -d'=' -f2)
+  # Strip any -mem0 suffix for display purposes
+  BASE_MODEL="${LLM_MODEL%-mem0}"
+  info "Using configured model: ${CYAN}${LLM_MODEL}${NC}"
+  echo ""
 else
-  if grep -q "^MEM0_LLM_MODEL=" .env; then
-    sed -i.bak "s/^MEM0_LLM_MODEL=.*/MEM0_LLM_MODEL=${LLM_MODEL}/" .env
-    rm -f .env.bak
+  echo "Select an LLM model for memory extraction:"
+  echo ""
+
+  idx=1
+  for model_entry in "${MODELS[@]}"; do
+    IFS='|' read -r name size desc min_ram <<< "$model_entry"
+    marker=""
+    if [ "$RAM_GB" -lt "$min_ram" ]; then
+      marker="${RED}⚠ needs ${min_ram}GB${NC}"
+    else
+      marker="${GREEN}✓ ${min_ram}GB+ RAM${NC}"
+    fi
+    if [ "$name" = "$DEFAULT_MODEL" ]; then
+      echo -e "  ${CYAN}${idx}.${NC} ${name}  ${size}GB   ${desc}  ${marker} ${YELLOW}(default)${NC}"
+    else
+      echo -e "  ${CYAN}${idx}.${NC} ${name}  ${size}GB   ${desc}  ${marker}"
+    fi
+    idx=$((idx + 1))
+  done
+
+  echo ""
+  read -rp "Choice [1-5] (default 2): " model_choice
+
+  case "${model_choice:-2}" in
+    1) LLM_MODEL="qwen2.5:3b" ;;
+    2) LLM_MODEL="qwen2.5:7b" ;;
+    3) LLM_MODEL="qwen3.5:9b" ;;
+    4) LLM_MODEL="gemma4:12b" ;;
+    5) LLM_MODEL="qwen3.5:27b" ;;
+    *) LLM_MODEL="qwen2.5:7b" ;;
+  esac
+
+  info "Selected: ${CYAN}${LLM_MODEL}${NC}"
+
+  # Save to .env (preserve existing customizations)
+  if [ ! -f .env ]; then
+    echo "MEM0_LLM_MODEL=${LLM_MODEL}" > .env
+    echo "MEM0_EMBED_MODEL=${EMBED_MODEL}" >> .env
+    echo "MEM0_DEFAULT_USER_ID=dev" >> .env
   else
-    echo "MEM0_LLM_MODEL=${LLM_MODEL}" >> .env
+    if grep -q "^MEM0_LLM_MODEL=" .env; then
+      sed -i.bak "s/^MEM0_LLM_MODEL=.*/MEM0_LLM_MODEL=${LLM_MODEL}/" .env
+      rm -f .env.bak
+    else
+      echo "MEM0_LLM_MODEL=${LLM_MODEL}" >> .env
+    fi
   fi
+  info "Config saved to .env"
 fi
-info "Config saved to .env"
 
 # ── Pull models if not present ──────────────────────────────────────────────
 check_model() {
@@ -341,6 +351,7 @@ fi
 # Create a custom model variant with full context window.
 # Ollama defaults to 2048-4096 context, but the extraction prompt is ~8000 tokens.
 # Without this, Ollama truncates the prompt and extraction fails silently.
+# Only create if the -mem0 variant doesn't exist yet.
 CUSTOM_MODEL="${LLM_MODEL}-mem0"
 if ! curl -s http://localhost:11434/api/tags 2>/dev/null | python3 -c "
 import sys, json
@@ -348,9 +359,10 @@ data = json.load(sys.stdin)
 models = [m['name'] for m in data.get('models', [])]
 sys.exit(0 if any('${CUSTOM_MODEL}' in m for m in models) else 1)
 " 2>/dev/null; then
-  warn "Creating custom model '${CUSTOM_MODEL}' with 32K context window..."
+  warn "Creating custom model '${CUSTOM_MODEL}' with full context window..."
   # Detect the model's native context length
-  CTX_LEN=$(curl -s http://localhost:11434/api/show -d "{\"model\": \"${LLM_MODEL}\"}" 2>/dev/null | \
+  BASE_FOR_CTX="${LLM_MODEL%-mem0}"
+  CTX_LEN=$(curl -s http://localhost:11434/api/show -d "{\"model\": \"${BASE_FOR_CTX}\"}" 2>/dev/null | \
     python3 -c "
 import sys, json
 try:
@@ -367,20 +379,21 @@ except:
 " 2>/dev/null)
   # Create a Modelfile that extends the context window
   cat <<EOF | ollama create "${CUSTOM_MODEL}" -f - 2>/dev/null
-FROM ${LLM_MODEL}
+FROM ${BASE_FOR_CTX}
 PARAMETER num_ctx ${CTX_LEN}
 PARAMETER num_predict 16000
 EOF
   info "Custom model created: ${CUSTOM_MODEL} (num_ctx: ${CTX_LEN})"
+  # Update .env to use the custom model
+  if grep -q "^MEM0_LLM_MODEL=" .env; then
+    sed -i.bak "s/^MEM0_LLM_MODEL=.*/MEM0_LLM_MODEL=${CUSTOM_MODEL}/" .env
+    rm -f .env.bak
+  fi
+  LLM_MODEL="${CUSTOM_MODEL}"
 else
-  info "Custom model already exists: ${CUSTOM_MODEL}"
+  info "Custom model ready: ${CUSTOM_MODEL}"
+  LLM_MODEL="${CUSTOM_MODEL}"
 fi
-# Update .env to use the custom model
-if grep -q "^MEM0_LLM_MODEL=" .env; then
-  sed -i.bak "s/^MEM0_LLM_MODEL=.*/MEM0_LLM_MODEL=${CUSTOM_MODEL}/" .env
-  rm -f .env.bak
-fi
-LLM_MODEL="${CUSTOM_MODEL}"
 
 if [ "$(check_model "$EMBED_MODEL")" = "1" ]; then
   info "Embedder model ready: $EMBED_MODEL"
