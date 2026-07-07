@@ -348,53 +348,6 @@ else
   info "LLM model pulled: $LLM_MODEL"
 fi
 
-# Create a custom model variant with full context window.
-# Ollama defaults to 2048-4096 context, but the extraction prompt is ~8000 tokens.
-# Without this, Ollama truncates the prompt and extraction fails silently.
-# Only create if the -mem0 variant doesn't exist yet.
-CUSTOM_MODEL="${LLM_MODEL}-mem0"
-if ! curl -s http://localhost:11434/api/tags 2>/dev/null | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-models = [m['name'] for m in data.get('models', [])]
-sys.exit(0 if any('${CUSTOM_MODEL}' in m for m in models) else 1)
-" 2>/dev/null; then
-  warn "Creating custom model '${CUSTOM_MODEL}' with full context window..."
-  # Detect the model's native context length
-  BASE_FOR_CTX="${LLM_MODEL%-mem0}"
-  CTX_LEN=$(curl -s http://localhost:11434/api/show -d "{\"model\": \"${BASE_FOR_CTX}\"}" 2>/dev/null | \
-    python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    info = data.get('model_info', {})
-    for key, val in info.items():
-        if key.endswith('.context_length') and isinstance(val, (int, float)):
-            print(int(val))
-            break
-    else:
-        print(32768)  # safe default
-except:
-    print(32768)
-" 2>/dev/null)
-  # Create a Modelfile that extends the context window
-  cat <<EOF | ollama create "${CUSTOM_MODEL}" -f - 2>/dev/null
-FROM ${BASE_FOR_CTX}
-PARAMETER num_ctx ${CTX_LEN}
-PARAMETER num_predict 16000
-EOF
-  info "Custom model created: ${CUSTOM_MODEL} (num_ctx: ${CTX_LEN})"
-  # Update .env to use the custom model
-  if grep -q "^MEM0_LLM_MODEL=" .env; then
-    sed -i.bak "s/^MEM0_LLM_MODEL=.*/MEM0_LLM_MODEL=${CUSTOM_MODEL}/" .env
-    rm -f .env.bak
-  fi
-  LLM_MODEL="${CUSTOM_MODEL}"
-else
-  info "Custom model ready: ${CUSTOM_MODEL}"
-  LLM_MODEL="${CUSTOM_MODEL}"
-fi
-
 if [ "$(check_model "$EMBED_MODEL")" = "1" ]; then
   info "Embedder model ready: $EMBED_MODEL"
 else

@@ -53,70 +53,57 @@ QDRANT_PORT = _env_int("MEM0_QDRANT_PORT", 6333)
 QDRANT_URL = f"http://{QDRANT_HOST}:{QDRANT_PORT}"
 
 
-def _detect_model_context_length(model_name: str) -> Optional[int]:
-    """Query Ollama /api/show for the model's context window size.
-
-    Returns the context_length from model_info (e.g., 32768 for qwen3.5),
-    or None if the model isn't available or the API doesn't report it.
-    """
-    try:
-        payload = json.dumps({"model": model_name}).encode()
-        req = urllib.request.Request(
-            f"{OLLAMA_URL}/api/show",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        resp = urllib.request.urlopen(req, timeout=10)
-        data = json.loads(resp.read())
-        model_info = data.get("model_info", {})
-        # model_info keys are like "llama.context_length", "qwen2.context_length", etc.
-        for key, val in model_info.items():
-            if key.endswith(".context_length") and isinstance(val, (int, float)):
-                return int(val)
-        return None
-    except Exception:
-        return None
-
-
-# Cache context length and chunk size at module level — avoids repeated
-# HTTP calls to Ollama on every add_memory / import_docs call.
-_CACHED_CTX_LEN: Optional[int] = None
-_CACHED_CHUNK_SIZE: Optional[int] = None
-
-
-def _get_cached_context_length() -> Optional[int]:
-    """Get the model's context length, cached after first call."""
-    global _CACHED_CTX_LEN
-    if _CACHED_CTX_LEN is None:
-        _CACHED_CTX_LEN = _detect_model_context_length(_LLM_MODEL)
-    return _CACHED_CTX_LEN
-
-
-def _compute_max_tokens(model_name: str, configured: int) -> int:
-    """Compute the optimal max_tokens for LLM extraction.
-
-    Logic:
-    1. Query the model's context window from Ollama
-    2. Reserve ~50% for the extraction prompt (system + user + context)
-    3. Use the remaining as max_tokens, but never less than configured
-    4. If we can't detect the context length, use the configured value
-    """
-    ctx_len = _get_cached_context_length()
-    if ctx_len is None or ctx_len <= 0:
-        return configured
-
-    # Reserve half the context for input, use the rest for output
-    # The extraction prompt is typically 1500-3000 tokens depending on
-    # existing memories and input length. 50% is a safe reserve.
-    computed = ctx_len // 2
-
-    # Use the larger of computed vs configured — never go below configured
-    return max(computed, configured)
-
+# ── LLM setup ───────────────────────────────────────────────────────────────
+# We subclass mem0's OllamaLLM to pass num_ctx (context window size) to Ollama.
+# Without this, Ollama defaults to 2048-4096 context and truncates the
+# ~8000-token extraction prompt, causing silent extraction failures.
+# Configurable via MEM0_LLM_CONTEXT_LENGTH env var (default: 32768).
 
 _LLM_MODEL = _env("MEM0_LLM_MODEL", "qwen2.5:7b")
-_LLM_MAX_TOKENS = _compute_max_tokens(_LLM_MODEL, _env_int("MEM0_LLM_MAX_TOKENS", 4000))
+_LLM_MAX_TOKENS = _env_int("MEM0_LLM_MAX_TOKENS", 4000)
+_LLM_NUM_CTX = _env_int("MEM0_LLM_CONTEXT_LENGTH", 32768)
+
+
+class ContextAwareOllamaLLM:
+    """Wrapper around mem0's OllamaLLM that:
+    1. Injects num_ctx into the Ollama options dict (mem0 doesn't expose it)
+    2. Logs LLM responses to stderr for debugging extraction failures
+
+    Without num_ctx, Ollama defaults to 2048-4096 context and truncates the
+    ~8000-token extraction prompt, causing silent extraction failures.
+    """
+
+    def __init__(self, original_llm):
+        self._llm = original_llm
+        self.last_response = None
+
+    def generate_response(self, *args, **kwargs):
+        original_chat = self._llm.client.chat
+
+        def _chat_with_ctx(**params):
+            if "options" not in params:
+                params["options"] = {}
+            params["options"]["num_ctx"] = _LLM_NUM_CTX
+            return original_chat(**params)
+
+        self._llm.client.chat = _chat_with_ctx
+        try:
+            response = self._llm.generate_response(*args, **kwargs)
+        finally:
+            self._llm.client.chat = original_chat
+
+        # Log the response for debugging
+        self.last_response = response
+        if response:
+            preview = response[:200].replace("\n", "\\n")
+            print(f"[llm] Response ({len(response)} chars): {preview}...", file=sys.stderr)
+        else:
+            print(f"[llm] Response was empty/null", file=sys.stderr)
+
+        return response
+
+    def __getattr__(self, name):
+        return getattr(self._llm, name)
 
 _DEFAULT_CUSTOM_INSTRUCTIONS = (
     "You are extracting memories for a software engineering knowledge base. "
@@ -269,62 +256,28 @@ def _chunk_text(text: str, max_chars: int = 3000, context_header: str = "") -> L
     return chunks
 
 
-# Dynamic chunk sizes based on model context window.
-# The extraction prompt is ~1500-3000 tokens. We want chunk + prompt to fit
-# comfortably in the context window, leaving room for the LLM output.
-# Formula: chunk_chars = (context_length * 0.4) * 4 (approx 4 chars per token)
-# This gives each chunk about 40% of the context window, leaving 60% for
-# the system prompt + existing memories context + LLM output.
+# Chunk size based on the configured context window.
+# The extraction prompt is ~6000 tokens. chunk + prompt must fit in num_ctx.
+# chunk_chars = (num_ctx - 6000) * 4 chars/token, clamped to 1000–16000.
 _CHUNK_SIZES = {
-    "qwen2.5:3b": 1500,   # 32768 ctx → ~13000, but 3b model is weaker so keep small
-    "qwen2.5:7b": 3000,   # 32768 ctx → ~13000, 7b handles 3000 reliably
-    "qwen3.5:9b": 4000,   # 32768 ctx → ~13000
-    "gemma4:12b": 5000,   # 8192 ctx → ~3200, but 12b handles longer
-    "qwen3.5:27b": 8000,  # 32768 ctx → ~13000
+    "qwen2.5:3b": 1500,
+    "qwen2.5:7b": 3000,
+    "qwen3.5:9b": 4000,
+    "gemma4:12b": 5000,
+    "qwen3.5:27b": 8000,
 }
 
 
 def _get_chunk_size() -> int:
     """Get the chunk size (in chars) for the configured LLM model.
 
-    Cached after first call to avoid repeated HTTP requests to Ollama.
-    Uses the model's detected context length to compute a safe chunk size
-    that fits alongside the extraction prompt and LLM output.
-    Falls back to the hardcoded _CHUNK_SIZES table if detection failed.
+    Computed from MEM0_LLM_CONTEXT_LENGTH: (context - 6000) * 4, clamped.
+    Falls back to the hardcoded _CHUNK_SIZES table for the model.
     """
-    global _CACHED_CHUNK_SIZE
-    if _CACHED_CHUNK_SIZE is not None:
-        return _CACHED_CHUNK_SIZE
-
-    model = CONFIG["llm"]["config"]["model"]
-
-    # Try dynamic computation from detected context length
-    ctx_len = _get_cached_context_length()
-    if ctx_len and ctx_len > 0:
-        # Reserve ~6000 tokens for extraction prompt + LLM output
-        # chunk_tokens = ctx_len - 6000, chunk_chars = chunk_tokens * 4
-        # This leaves 6000 tokens for the system prompt + user prompt wrapper + output
-        chunk_tokens = max(1000, ctx_len - 6000)
-        computed = chunk_tokens * 4
-        # Clamp to reasonable bounds: 1000–16000 chars
-        computed = max(1000, min(computed, 16000))
-        _CACHED_CHUNK_SIZE = computed
-        return computed
-
-    # Fallback to hardcoded table
-    if model in _CHUNK_SIZES:
-        size = _CHUNK_SIZES[model]
-        _CACHED_CHUNK_SIZE = size
-        return size
-    best_match = None
-    best_len = 0
-    for key, size in _CHUNK_SIZES.items():
-        if model.startswith(key) and len(key) > best_len:
-            best_match = size
-            best_len = len(key)
-    size = best_match if best_match is not None else 3000
-    _CACHED_CHUNK_SIZE = size
-    return size
+    # Compute from context length: reserve 6000 tokens for prompt + output
+    chunk_tokens = max(1000, _LLM_NUM_CTX - 6000)
+    computed = max(1000, min(chunk_tokens * 4, 16000))
+    return computed
 
 
 def _detect_conversation(content: str) -> Tuple[bool, Optional[List]]:
@@ -437,6 +390,8 @@ def init_memory() -> Any:
             print(f"[mcp_server] CONFIG: {json.dumps(CONFIG, default=str, indent=2)}", flush=True)
             print(f"[mcp_server] MEM0_TELEMETRY env: {os.environ.get('MEM0_TELEMETRY', 'NOT SET')}", flush=True)
             _memory = Memory.from_config(CONFIG)
+            # Wrap the LLM to inject num_ctx into every Ollama call
+            _memory.llm = ContextAwareOllamaLLM(_memory.llm)
             print("[mcp_server] ✅ mem0 initialized", flush=True)
 
             # Verify the collection was actually created. mem0 doesn't always
@@ -869,30 +824,6 @@ def _diagnose_llm_failure(m, model_name: str) -> str:
         return f"LLM diagnostic call failed: {e}"
 
 
-class LLMResponseLogger:
-    """Wraps an LLM instance and logs every response to stderr.
-    Used to capture what the LLM actually returns during extraction,
-    so when mem0 silently returns empty, we can see why in the logs."""
-
-    def __init__(self, llm):
-        self._llm = llm
-        self.last_response = None
-
-    def generate_response(self, *args, **kwargs):
-        response = self._llm.generate_response(*args, **kwargs)
-        self.last_response = response
-        # Log a truncated version for debugging
-        if response:
-            preview = response[:200].replace("\n", "\\n")
-            print(f"[llm] Response ({len(response)} chars): {preview}...", file=sys.stderr)
-        else:
-            print(f"[llm] Response was empty/null", file=sys.stderr)
-        return response
-
-    def __getattr__(self, name):
-        return getattr(self._llm, name)
-
-
 # ── Tool execution ──────────────────────────────────────────────────────────
 
 def execute_tool(name: str, arguments: dict) -> dict:
@@ -918,10 +849,6 @@ def execute_tool(name: str, arguments: dict) -> dict:
 
         def _do_add(text, user_id, meta, use_infer):
             """Call m.add() with LLM response logging for diagnostics."""
-            # Wrap the LLM to capture responses
-            logger = LLMResponseLogger(m.llm)
-            m.llm = logger
-
             try:
                 result = m.add(text, user_id=user_id, metadata=meta, infer=use_infer)
 
@@ -929,7 +856,7 @@ def execute_tool(name: str, arguments: dict) -> dict:
                     r = result.get("results", []) if isinstance(result, dict) else result
                     if not r:
                         # Build diagnostic from captured LLM response
-                        actual = logger.last_response
+                        actual = m.llm.last_response if hasattr(m.llm, 'last_response') else None
                         if actual is None:
                             reason = "LLM was never called — mem0 may have skipped extraction (input too short or unrecognized format)"
                         elif not actual or not actual.strip():
@@ -944,7 +871,6 @@ def execute_tool(name: str, arguments: dict) -> dict:
 
             except Exception as e:
                 err_str = str(e)
-                # Classify known errors
                 if "Vector dimension" in err_str:
                     raise QdrantError(
                         "Vector dimension mismatch in Qdrant.",
@@ -968,9 +894,6 @@ def execute_tool(name: str, arguments: dict) -> dict:
                     )
                 chunk_errors.append(err_str)
                 return {"results": [], "error": err_str}
-            finally:
-                # Restore original LLM
-                m.llm = logger._llm
 
         if is_conversation or len(content) <= MAX_CHUNK_CHARS:
             # Single call — no chunking needed
@@ -1784,7 +1707,7 @@ async def main():
 
     server = await asyncio.start_server(http_handler, MCP_HOST, MCP_PORT)
     print(f"mem0-local MCP server listening on {MCP_HOST}:{MCP_PORT}", flush=True)
-    print(f"  LLM:      {CONFIG['llm']['config']['model']} @ {OLLAMA_URL} (max_tokens: {_LLM_MAX_TOKENS})", flush=True)
+    print(f"  LLM:      {CONFIG['llm']['config']['model']} @ {OLLAMA_URL} (ctx: {_LLM_NUM_CTX}, max_tokens: {_LLM_MAX_TOKENS})", flush=True)
     print(f"  Embedder: {CONFIG['embedder']['config']['model']} @ {OLLAMA_URL}", flush=True)
     print(f"  Vector:   Qdrant @ {QDRANT_URL}", flush=True)
     print(f"  Tools:    {len(TOOL_DEFINITIONS)}", flush=True)

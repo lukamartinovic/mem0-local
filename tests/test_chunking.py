@@ -114,9 +114,14 @@ class TestChunkText:
 # ── _get_chunk_size ──────────────────────────────────────────────────────────
 
 class TestGetChunkSize:
-    def test_default_model(self):
-        """Default config (qwen2.5:7b) returns 3000."""
-        assert mcp_server._get_chunk_size() == 3000
+    def test_default_context_length(self):
+        """Default context length (32768) produces 16000 char chunks."""
+        original = mcp_server._LLM_NUM_CTX
+        try:
+            mcp_server._LLM_NUM_CTX = 32768
+            assert mcp_server._get_chunk_size() == 16000
+        finally:
+            mcp_server._LLM_NUM_CTX = original
 
     def test_known_models(self):
         """All known models return correct chunk sizes."""
@@ -126,23 +131,23 @@ class TestGetChunkSize:
         assert mcp_server._CHUNK_SIZES["gemma4:12b"] == 5000
         assert mcp_server._CHUNK_SIZES["qwen3.5:27b"] == 8000
 
-    def test_unknown_model_default(self):
-        """Unknown model returns default 3000."""
-        original = mcp_server.CONFIG["llm"]["config"]["model"]
+    def test_chunk_size_from_context_length(self):
+        """Chunk size is computed from MEM0_LLM_CONTEXT_LENGTH."""
+        original = mcp_server._LLM_NUM_CTX
         try:
-            mcp_server.CONFIG["llm"]["config"]["model"] = "unknown-model:1b"
-            assert mcp_server._get_chunk_size() == 3000
-        finally:
-            mcp_server.CONFIG["llm"]["config"]["model"] = original
+            # 32768 ctx → (32768 - 6000) * 4 = 106872, clamped to 16000
+            mcp_server._LLM_NUM_CTX = 32768
+            assert mcp_server._get_chunk_size() == 16000
 
-    def test_prefix_match(self):
-        """Model name that's a superset of a known model uses prefix matching."""
-        original = mcp_server.CONFIG["llm"]["config"]["model"]
-        try:
-            mcp_server.CONFIG["llm"]["config"]["model"] = "qwen2.5:7b-instruct"
-            assert mcp_server._get_chunk_size() == 3000
+            # 8192 ctx → (8192 - 6000) * 4 = 8768
+            mcp_server._LLM_NUM_CTX = 8192
+            assert mcp_server._get_chunk_size() == 8768
+
+            # Very small ctx → chunk_tokens clamped to 1000, * 4 = 4000
+            mcp_server._LLM_NUM_CTX = 2048
+            assert mcp_server._get_chunk_size() == 4000
         finally:
-            mcp_server.CONFIG["llm"]["config"]["model"] = original
+            mcp_server._LLM_NUM_CTX = original
 
 
 # ── _detect_conversation ─────────────────────────────────────────────────────
