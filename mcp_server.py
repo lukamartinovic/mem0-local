@@ -234,23 +234,43 @@ def _chunk_text(text: str, max_chars: int = 3000, context_header: str = "") -> L
     return chunks
 
 
-# Model-specific chunk sizes (chars). Larger models handle longer context for JSON extraction.
-# mem0's extraction prompt is ~2K chars, so chunk + prompt must fit in the model's effective context.
+# Dynamic chunk sizes based on model context window.
+# The extraction prompt is ~1500-3000 tokens. We want chunk + prompt to fit
+# comfortably in the context window, leaving room for the LLM output.
+# Formula: chunk_chars = (context_length * 0.4) * 4 (approx 4 chars per token)
+# This gives each chunk about 40% of the context window, leaving 60% for
+# the system prompt + existing memories context + LLM output.
 _CHUNK_SIZES = {
-    "qwen2.5:3b": 1500,
-    "qwen2.5:7b": 3000,
-    "qwen3.5:9b": 4000,
-    "gemma4:12b": 5000,
-    "qwen3.5:27b": 8000,
+    "qwen2.5:3b": 1500,   # 32768 ctx → ~13000, but 3b model is weaker so keep small
+    "qwen2.5:7b": 3000,   # 32768 ctx → ~13000, 7b handles 3000 reliably
+    "qwen3.5:9b": 4000,   # 32768 ctx → ~13000
+    "gemma4:12b": 5000,   # 8192 ctx → ~3200, but 12b handles longer
+    "qwen3.5:27b": 8000,  # 32768 ctx → ~13000
 }
 
+
 def _get_chunk_size() -> int:
-    """Get the chunk size (in chars) for the configured LLM model."""
+    """Get the chunk size (in chars) for the configured LLM model.
+
+    If we detected the model's context length at startup, compute the chunk
+    size dynamically: 40% of context window * 4 chars/token. This ensures
+    chunk + extraction prompt + LLM output all fit in the context window.
+    Falls back to the hardcoded _CHUNK_SIZES table if detection failed.
+    """
     model = CONFIG["llm"]["config"]["model"]
-    # Exact match first
+
+    # Try dynamic computation from detected context length
+    ctx_len = _detect_model_context_length(model)
+    if ctx_len and ctx_len > 0:
+        # 40% of context for the chunk, ~4 chars per token
+        computed = int(ctx_len * 0.4 * 4)
+        # Clamp to reasonable bounds: 1000–16000 chars
+        computed = max(1000, min(computed, 16000))
+        return computed
+
+    # Fallback to hardcoded table
     if model in _CHUNK_SIZES:
         return _CHUNK_SIZES[model]
-    # Prefix match: find the most specific (longest) matching key
     best_match = None
     best_len = 0
     for key, size in _CHUNK_SIZES.items():
@@ -430,7 +450,8 @@ def init_memory() -> Any:
 TOOL_DEFINITIONS = [
     {
         "name": "add_memory",
-        "description": "Save text or conversation history to persistent memory. "
+        "description": "Save text or conversation history to persistent memory with LLM fact extraction. "
+                       "Large content is automatically chunked based on the model's context window. "
                        "Use this to remember facts, decisions, user preferences, "
                        "code patterns, or anything worth recalling later.",
         "inputSchema": {
@@ -439,8 +460,21 @@ TOOL_DEFINITIONS = [
                 "content": {"type": "string", "description": "The text or conversation to remember."},
                 "user_id": {"type": "string", "description": "User identifier", "default": DEFAULT_USER_ID},
                 "metadata": {"type": "object", "description": "Optional metadata to attach"},
-                "infer": {"type": "boolean", "default": True,
-                          "description": "If true (default), use LLM to extract facts. If false, store raw text directly."},
+            },
+            "required": ["content"],
+        },
+    },
+    {
+        "name": "add_raw_memory",
+        "description": "Store text directly as a memory WITHOUT LLM fact extraction. "
+                       "Use this for bulk imports, backups, or when the LLM is unavailable. "
+                       "Memories are stored as-is and searched via embeddings only (no deduplication).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "description": "The text to store as-is."},
+                "user_id": {"type": "string", "description": "User identifier", "default": DEFAULT_USER_ID},
+                "metadata": {"type": "object", "description": "Optional metadata to attach"},
             },
             "required": ["content"],
         },
@@ -816,7 +850,7 @@ def execute_tool(name: str, arguments: dict) -> dict:
             raise Mem0Error("Cannot save empty content.", tool=name,
                             fix="Provide text or a conversation to remember.")
 
-        infer = arguments.get("infer", True)
+        infer = True  # add_memory always uses LLM extraction
         metadata = arguments.get("metadata")
         model_name = CONFIG["llm"]["config"]["model"]
         MAX_CHUNK_CHARS = _get_chunk_size()
@@ -930,6 +964,19 @@ def execute_tool(name: str, arguments: dict) -> dict:
                 )
         return merged
 
+    # ── add_raw_memory ──────────────────────────────────────────────────────
+    elif name == "add_raw_memory":
+        content = arguments["content"]
+        if not content or not content.strip():
+            raise Mem0Error("Cannot save empty content.", tool=name,
+                            fix="Provide text to store.")
+        metadata = arguments.get("metadata")
+        try:
+            result = m.add(content, user_id=uid, metadata=metadata, infer=False)
+            return result
+        except Exception as e:
+            raise Mem0Error("Failed to store raw memory.", tool=name, detail=str(e))
+
     # ── search_memories ─────────────────────────────────────────────────────
     elif name == "search_memories":
         query = arguments.get("query", "")
@@ -1033,21 +1080,54 @@ def execute_tool(name: str, arguments: dict) -> dict:
 
     # ── list_entities ───────────────────────────────────────────────────────
     elif name == "list_entities":
-        # mem0 2.0.11 requires filters in get_all()
-        # We can't list ALL entities without a filter, so we use the default user_id
-        # and also try the known user_id patterns from metadata
+        # Query Qdrant directly for all distinct user_id values in the collection.
+        # mem0's get_all() requires a user_id filter, so we can't list all entities
+        # through the library API. Instead, scroll the Qdrant collection directly.
         entities = set()
-        # Try the default user_id first
-        for filter_val in [uid]:
+        try:
+            # Use Qdrant scroll API to get all points with their payloads
+            qdrant_host = CONFIG["vector_store"]["config"]["host"]
+            qdrant_port = CONFIG["vector_store"]["config"]["port"]
+            qdrant_base = f"http://{qdrant_host}:{qdrant_port}"
+
+            # Scroll through all points in the mem0 collection
+            offset = None
+            while True:
+                url = f"{qdrant_base}/collections/mem0/points/scroll"
+                payload = json.dumps({
+                    "limit": 100,
+                    "with_payload": True,
+                    "with_vector": False,
+                    **({"offset": offset} if offset else {}),
+                }).encode()
+                req = urllib.request.Request(url, data=payload,
+                    headers={"Content-Type": "application/json"}, method="POST")
+                resp = urllib.request.urlopen(req, timeout=10)
+                data = json.loads(resp.read())
+                points = data.get("result", {}).get("points", [])
+                if not points:
+                    break
+                for point in points:
+                    payload = point.get("payload", {})
+                    for key in ("user_id", "agent_id", "app_id", "run_id"):
+                        val = payload.get(key)
+                        if val:
+                            entities.add(val)
+                offset = data.get("result", {}).get("next_offset")
+                if offset is None:
+                    break
+        except Exception as e:
+            print(f"[list_entities] Warning: {e}", file=sys.stderr)
+            # Fallback: try the default user_id via mem0 API
             try:
-                all_mems = m.get_all(filters={"user_id": filter_val}, top_k=500)
+                all_mems = m.get_all(filters={"user_id": uid}, top_k=500)
                 results = all_mems if isinstance(all_mems, list) else all_mems.get("results", [])
                 for mem in results:
                     for key in ("user_id", "agent_id", "app_id", "run_id"):
                         if key in (mem or {}):
                             entities.add(mem[key])
-            except Exception as e:
-                print(f"[list_entities] Warning: {e}", file=sys.stderr)
+            except Exception:
+                pass
         return {"entities": sorted(entities)}
 
     # ── delete_entities ─────────────────────────────────────────────────────
@@ -1243,6 +1323,58 @@ def execute_tool(name: str, arguments: dict) -> dict:
 
 
 # ── MCP HTTP server (manual JSON-RPC over HTTP) ─────────────────────────────
+
+def _scroll_all_memories() -> dict:
+    """Scroll the Qdrant mem0 collection directly to get all memories with
+    their payloads. Used by the web UI. Returns {memories: [...], entities: [...]}.
+    """
+    memories: List[dict] = []
+    entities = set()
+
+    qdrant_host = CONFIG["vector_store"]["config"]["host"]
+    qdrant_port = CONFIG["vector_store"]["config"]["port"]
+    qdrant_base = f"http://{qdrant_host}:{qdrant_port}"
+
+    try:
+        offset = None
+        while True:
+            url = f"{qdrant_base}/collections/mem0/points/scroll"
+            payload = json.dumps({
+                "limit": 250,
+                "with_payload": True,
+                "with_vector": False,
+                **({"offset": offset} if offset else {}),
+            }).encode()
+            req = urllib.request.Request(url, data=payload,
+                headers={"Content-Type": "application/json"}, method="POST")
+            resp = urllib.request.urlopen(req, timeout=15)
+            data = json.loads(resp.read())
+            points = data.get("result", {}).get("points", [])
+            if not points:
+                break
+            for point in points:
+                p = point.get("payload", {})
+                # Extract the memory text and metadata
+                mem = {
+                    "id": point.get("id", ""),
+                    "memory": p.get("data", p.get("memory", p.get("text", ""))),
+                    "user_id": p.get("user_id", ""),
+                    "created_at": p.get("created_at", ""),
+                    "metadata": {k: v for k, v in p.items()
+                                 if k not in ("data", "memory", "text", "user_id",
+                                              "created_at", "embedding", "text_lemmatized")},
+                }
+                memories.append(mem)
+                if p.get("user_id"):
+                    entities.add(p["user_id"])
+            offset = data.get("result", {}).get("next_offset")
+            if offset is None:
+                break
+    except Exception as e:
+        print(f"[web_ui] Failed to scroll memories: {e}", file=sys.stderr)
+
+    return {"memories": memories, "entities": sorted(entities)}
+
 
 def _render_web_ui() -> str:
     """Render a simple HTML page for browsing memories in the database."""
@@ -1443,25 +1575,11 @@ async def http_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
             await writer.wait_closed()
             return
 
-        # API for web UI — list all memories
+        # API for web UI — list all memories via direct Qdrant scroll
         if method == "GET" and path == "/api/memories":
             try:
-                result = await asyncio.to_thread(execute_tool, "list_entities", {})
-                entities = result.get("entities", [])
-                all_memories: List[dict] = []
-                for entity in entities:
-                    try:
-                        mem_result = await asyncio.to_thread(
-                            execute_tool, "get_memories",
-                            {"user_id": entity, "limit": 100})
-                        mems = mem_result if isinstance(mem_result, list) else mem_result.get("results", [])
-                        for mem in mems:
-                            if isinstance(mem, dict):
-                                all_memories.append(mem)
-                    except Exception:
-                        pass
-                response = json.dumps({"memories": all_memories, "entities": entities},
-                                      default=str).encode()
+                response_obj = await asyncio.to_thread(_scroll_all_memories)
+                response = json.dumps(response_obj, default=str).encode()
                 header = (
                     f"HTTP/1.1 200 OK\r\n"
                     f"Content-Type: application/json\r\n"

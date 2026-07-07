@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Self-test: exercises all 12 MCP tools end-to-end.
+Self-test: exercises all 13 MCP tools end-to-end.
 Runs inside the container after startup, before accepting IDE requests.
 Errors from execute_tool now raise Mem0Error subclasses with actionable messages.
 """
@@ -53,7 +53,7 @@ def run():
 
     print()
     print("┌──────────────────────────────────────────────────────────┐")
-    print("│  mem0-local self-test — exercising all 12 MCP tools      │")
+    print("│  mem0-local self-test — exercising all 13 MCP tools      │")
     print("└──────────────────────────────────────────────────────────┘")
     print()
 
@@ -80,13 +80,13 @@ def run():
 
     # 1. add_memory (string, infer=False — selftest verifies CRUD, not LLM extraction)
     def test_add_string():
-        result = mcp_server.execute_tool("add_memory", {
+        result = mcp_server.execute_tool("add_raw_memory", {
             "content": "My name is Alice. I work at Acme Corp as a senior software engineer. "
                        "I use TypeScript and React for frontend development, Node.js for the backend, "
                        "and PostgreSQL as the database. We deploy to AWS using GitHub Actions CI/CD. "
                        "I prefer dark mode in my IDE and use Neovim as my primary editor.",
             "user_id": test_user,
-            "infer": False,
+            
         })
         results = result.get("results", []) if isinstance(result, dict) else result
         if not results:
@@ -94,7 +94,7 @@ def run():
                 "add_memory returned no results",
                 detail=f"Result: {result}",
             )
-    check("1/12  add_memory (string)", test_add_string)
+    check("1/13  add_raw_memory (string)", test_add_string)
 
     # 2. add_memory (conversation messages as JSON, infer=False)
     def test_add_conversation():
@@ -106,10 +106,10 @@ def run():
                                              "using Apollo Server with schema-first approach to solve "
                                              "over-fetching on mobile."},
         ])
-        result = mcp_server.execute_tool("add_memory", {
+        result = mcp_server.execute_tool("add_raw_memory", {
             "content": messages,
             "user_id": test_user,
-            "infer": False,
+            
         })
         results = result.get("results", []) if isinstance(result, dict) else result
         if not results:
@@ -117,7 +117,7 @@ def run():
                 "add_memory returned no results for conversation input",
                 detail=f"Result: {result}",
             )
-    check("2/12  add_memory (conversation)", test_add_conversation)
+    check("2/13  add_raw_memory (conversation)", test_add_conversation)
 
     time.sleep(2)
 
@@ -141,7 +141,7 @@ def run():
                             fix="This is expected if Qdrant doesn't return scores, but the field should exist (may be null)")
         # Save a memory_id for later tests
         test_memory_id[0] = first.get("id") or first.get("memory_id")
-    check("3/12  search_memories (with scores)", test_search)
+    check("3/13  search_memories (with scores)", test_search)
 
     # 4. search_memories (min_score filter)
     def test_search_min_score():
@@ -158,7 +158,7 @@ def run():
         if not isinstance(results, list):
             raise Mem0Error("search_memories with min_score did not return a list",
                             detail=f"Result: {result}")
-    check("4/12  search_memories (min_score filter)", test_search_min_score)
+    check("4/13  search_memories (min_score filter)", test_search_min_score)
 
     # 5. get_memories
     def test_get_all():
@@ -169,7 +169,7 @@ def run():
         if not result:
             raise Mem0Error("get_memories returned empty",
                             detail="Expected at least 1 memory from previous add")
-    check("5/12  get_memories", test_get_all)
+    check("5/13  get_memories", test_get_all)
 
     # 6. get_memory (by ID)
     def test_get_one():
@@ -189,7 +189,7 @@ def run():
         result = mcp_server.execute_tool("get_memory", {"memory_id": test_memory_id[0]})
         if not result:
             raise Mem0Error(f"get_memory returned empty for id={test_memory_id[0]}")
-    check("6/12  get_memory (by ID)", test_get_one)
+    check("6/13  get_memory (by ID)", test_get_one)
 
     # 7. update_memory
     def test_update():
@@ -199,7 +199,7 @@ def run():
             "memory_id": test_memory_id[0],
             "content": "Updated: I now prefer Python over everything.",
         })
-    check("7/12  update_memory", test_update)
+    check("7/13  update_memory", test_update)
 
     # 8. list_entities
     def test_list_entities():
@@ -207,7 +207,7 @@ def run():
         if "entities" not in result:
             raise Mem0Error("list_entities returned no 'entities' key",
                             detail=f"Result: {result}")
-    check("8/12  list_entities", test_list_entities)
+    check("8/13  list_entities", test_list_entities)
 
     # 9. export_memories (JSON format)
     def test_export_json():
@@ -222,7 +222,7 @@ def run():
             raise Mem0Error(f"export_memories format mismatch: expected 'json', got '{result.get('format')}'")
         if not isinstance(result["memories"], list):
             raise Mem0Error("export_memories memories is not a list")
-    check("9/12  export_memories (JSON)", test_export_json)
+    check("9/13  export_memories (JSON)", test_export_json)
 
     # 10. export_memories (CSV format)
     def test_export_csv():
@@ -239,7 +239,7 @@ def run():
             raise Mem0Error("export_memories csv data is not a string")
         if "id,memory,metadata,created_at,user_id" not in result["data"]:
             raise Mem0Error("export_memories csv missing header row")
-    check("10/12  export_memories (CSV)", test_export_csv)
+    check("10/13  export_memories (CSV)", test_export_csv)
 
     # 11. import_memories
     def test_import():
@@ -264,7 +264,7 @@ def run():
                             detail=f"Result: {result}")
         # Clean up
         mcp_server.execute_tool("delete_all_memories", {"user_id": import_user})
-    check("11/12  import_memories", test_import)
+    check("11/13  import_memories", test_import)
 
     # 12. prune_memories (dry run)
     def test_prune_dry_run():
@@ -280,7 +280,7 @@ def run():
             raise Mem0Error("prune_memories dry_run should be True")
         if result.get("deleted", 0) != 0:
             raise Mem0Error("prune_memories in dry_run should not delete anything")
-    check("12/12  prune_memories (dry run)", test_prune_dry_run)
+    check("13/13  prune_memories (dry run)", test_prune_dry_run)
 
     # Cleanup: delete all test memories
     mcp_server.execute_tool("delete_all_memories", {"user_id": test_user})
@@ -311,7 +311,7 @@ def _print_summary():
         print("  • Check Docker:         docker compose logs mcp-server")
     else:
         print(f"{GREEN}┌──────────────────────────────────────────────────────────┐")
-        print(f"│  ✅ 12/12 tools passed — all MCP commands verified        │")
+        print(f"│  ✅ 13/13 tools passed — all MCP commands verified        │")
         print(f"└──────────────────────────────────────────────────────────┘{NC}")
     print()
 

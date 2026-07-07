@@ -129,9 +129,9 @@ class TestMCPProtocol:
     def test_list_tools(self):
         resp = mcp_call("tools/list")
         tools = resp["result"]["tools"]
-        assert len(tools) == 12
+        assert len(tools) == 13
         names = {t["name"] for t in tools}
-        expected = {"add_memory", "search_memories", "get_memories",
+        expected = {"add_memory", "add_raw_memory", "search_memories", "get_memories",
                     "get_memory", "update_memory", "delete_memory",
                     "delete_all_memories", "list_entities", "delete_entities",
                     "export_memories", "import_memories", "prune_memories"}
@@ -141,19 +141,17 @@ class TestMCPProtocol:
 # ── Memory operation tests ─────────────────────────────────────────────────
 
 class TestMemoryOperations:
-    """Memory operation tests. All use infer=False (raw text storage) because
+    """Memory operation tests. All use add_raw_memory (no LLM extraction) because
     these tests verify the CRUD pipeline — add, search, get, delete, entities.
-    LLM extraction quality depends on the model and prompt content, which is
-    not what these tests verify. The server's auto-degrade feature handles
-    LLM failures gracefully in real usage."""
+    LLM extraction is tested in real usage via add_memory (infer=True always)."""
 
     def test_add_and_search(self, test_user):
-        mcp_tool("add_memory", {
+        mcp_tool("add_raw_memory", {
             "content": "My name is Alice. I work at Acme Corp as a senior software engineer. "
                        "I use TypeScript and React for frontend development, Node.js for the backend, "
                        "and PostgreSQL as the database. We deploy to AWS using GitHub Actions CI/CD.",
             "user_id": test_user,
-            "infer": False,
+
         })
         results = mcp_tool("search_memories", {
             "query": "What programming languages does Alice use?",
@@ -172,10 +170,10 @@ class TestMemoryOperations:
             {"role": "assistant", "content": "Noted. I'll remember you're migrating from REST to GraphQL "
                                              "using Apollo Server with schema-first approach."},
         ]
-        mcp_tool("add_memory", {
+        mcp_tool("add_raw_memory", {
             "content": json.dumps(messages),
             "user_id": test_user,
-            "infer": False,
+
         })
         results = mcp_tool("search_memories", {
             "query": "API migration plan",
@@ -186,29 +184,29 @@ class TestMemoryOperations:
             f"Expected migration info in results, got: {results}"
 
     def test_get_memories(self, test_user):
-        mcp_tool("add_memory", {
+        mcp_tool("add_raw_memory", {
             "content": "We use Redis for caching and Kafka for event streaming. "
                        "The Redis instance runs on port 6379 and Kafka on port 9092.",
             "user_id": test_user,
-            "infer": False,
+
         })
         results = mcp_tool("get_memories", {"user_id": test_user, "limit": 10})
         assert results, "get_memories returned empty"
 
     def test_delete_all_memories(self, test_user):
-        mcp_tool("add_memory", {"content": "Memory to delete", "user_id": test_user, "infer": False})
-        mcp_tool("add_memory", {"content": "Another to delete", "user_id": test_user, "infer": False})
+        mcp_tool("add_raw_memory", {"content": "Memory to delete", "user_id": test_user})
+        mcp_tool("add_raw_memory", {"content": "Another to delete", "user_id": test_user})
         mcp_tool("delete_all_memories", {"user_id": test_user})
         results = mcp_tool("search_memories", {"query": "delete", "user_id": test_user})
         results_list = results if isinstance(results, list) else results.get("results", [])
         assert len(results_list) == 0, f"Memories still exist: {results_list}"
 
     def test_add_with_metadata(self, test_user):
-        mcp_tool("add_memory", {
+        mcp_tool("add_raw_memory", {
             "content": "We deployed the auth service to staging on Tuesday. "
                        "It uses JWT tokens with 24-hour expiry and refresh tokens with 7-day expiry.",
             "user_id": test_user,
-            "infer": False,
+
             "metadata": {"category": "deployment", "env": "staging"},
         })
         results = mcp_tool("search_memories", {
@@ -222,10 +220,10 @@ class TestMemoryOperations:
             mcp_tool("nonexistent_tool", {})
 
     def test_list_entities(self, test_user):
-        mcp_tool("add_memory", {
+        mcp_tool("add_raw_memory", {
             "content": "The database is PostgreSQL version 15 running on port 5432.",
             "user_id": test_user,
-            "infer": False,
+
         })
         # list_entities doesn't take arguments
         results = mcp_tool("list_entities", {})
@@ -235,7 +233,7 @@ class TestMemoryOperations:
         assert test_user in entities or len(entities) > 0
 
     def test_delete_entities(self, test_user):
-        mcp_tool("add_memory", {"content": "Entity to delete", "user_id": test_user, "infer": False})
+        mcp_tool("add_raw_memory", {"content": "Entity to delete", "user_id": test_user})
         mcp_tool("delete_entities", {"user_id": test_user})
         results = mcp_tool("search_memories", {"query": "entity", "user_id": test_user})
         results_list = results if isinstance(results, list) else results.get("results", [])

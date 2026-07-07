@@ -83,10 +83,10 @@ class TestMemoryRaw:
 
     def test_add_raw_and_search(self, memory, test_user):
         """Add text with infer=False, then search finds it via embedding."""
-        mcp_server.execute_tool("add_memory", {
+        mcp_server.execute_tool("add_raw_memory", {
             "content": "I prefer TypeScript over JavaScript and use ESLint.",
             "user_id": test_user,
-            "infer": False,
+            
         })
         time.sleep(1)  # Let embedding index
         result = mcp_server.execute_tool("search_memories", {
@@ -100,10 +100,10 @@ class TestMemoryRaw:
 
     def test_add_raw_get_memories(self, memory, test_user):
         """Add with infer=False, then get_memories lists it."""
-        mcp_server.execute_tool("add_memory", {
+        mcp_server.execute_tool("add_raw_memory", {
             "content": "Deployed auth service to staging on Tuesday.",
             "user_id": test_user,
-            "infer": False,
+            
         })
         time.sleep(1)
         result = mcp_server.execute_tool("get_memories", {
@@ -115,10 +115,10 @@ class TestMemoryRaw:
 
     def test_add_raw_get_by_id(self, memory, test_user):
         """Add with infer=False, then get_memory retrieves it by ID."""
-        mcp_server.execute_tool("add_memory", {
+        mcp_server.execute_tool("add_raw_memory", {
             "content": "The API rate limit is 100 requests per minute.",
             "user_id": test_user,
-            "infer": False,
+            
         })
         time.sleep(1)
         all_mems = mcp_server.execute_tool("get_memories", {
@@ -134,10 +134,10 @@ class TestMemoryRaw:
 
     def test_add_raw_update(self, memory, test_user):
         """Add with infer=False, then update_memory overwrites content."""
-        mcp_server.execute_tool("add_memory", {
+        mcp_server.execute_tool("add_raw_memory", {
             "content": "Database runs on port 5432.",
             "user_id": test_user,
-            "infer": False,
+            
         })
         time.sleep(1)
         all_mems = mcp_server.execute_tool("get_memories", {
@@ -162,10 +162,10 @@ class TestMemoryRaw:
 
     def test_add_raw_delete(self, memory, test_user):
         """Add with infer=False, then delete_memory removes it."""
-        mcp_server.execute_tool("add_memory", {
+        mcp_server.execute_tool("add_raw_memory", {
             "content": "Temporary memory for deletion test.",
             "user_id": test_user,
-            "infer": False,
+            
         })
         time.sleep(1)
         all_mems = mcp_server.execute_tool("get_memories", {
@@ -188,10 +188,10 @@ class TestMemoryRaw:
     def test_add_raw_delete_all(self, memory, test_user):
         """Add multiple with infer=False, then delete_all clears them."""
         for i in range(3):
-            mcp_server.execute_tool("add_memory", {
+            mcp_server.execute_tool("add_raw_memory", {
                 "content": f"Batch memory {i} for delete_all test.",
                 "user_id": test_user,
-                "infer": False,
+                
             })
         time.sleep(1)
         mcp_server.execute_tool("delete_all_memories", {"user_id": test_user})
@@ -205,10 +205,10 @@ class TestMemoryRaw:
 
     def test_add_raw_with_metadata(self, memory, test_user):
         """Add with infer=False and metadata, verify it's stored."""
-        mcp_server.execute_tool("add_memory", {
+        mcp_server.execute_tool("add_raw_memory", {
             "content": "Important architectural decision: use event sourcing.",
             "user_id": test_user,
-            "infer": False,
+            
             "metadata": {"category": "architecture", "priority": "high"},
         })
         time.sleep(1)
@@ -223,10 +223,10 @@ class TestMemoryRaw:
 
     def test_add_raw_list_entities(self, memory, test_user):
         """Add with infer=False, then list_entities shows the user."""
-        mcp_server.execute_tool("add_memory", {
+        mcp_server.execute_tool("add_raw_memory", {
             "content": "Entity test for raw infer=False pipeline.",
             "user_id": test_user,
-            "infer": False,
+            
         })
         time.sleep(1)
         result = mcp_server.execute_tool("list_entities", {})
@@ -239,10 +239,10 @@ class TestMemoryRaw:
         # Generate text that will be chunked
         paragraphs = [f"Section {i}. " + "lorem ipsum " * 50 for i in range(20)]
         large_text = "\n\n".join(paragraphs)
-        result = mcp_server.execute_tool("add_memory", {
+        result = mcp_server.execute_tool("add_raw_memory", {
             "content": large_text,
             "user_id": test_user,
-            "infer": False,
+            
             "metadata": {"source": "chunk_test"},
         })
         # Should succeed and report chunks

@@ -90,9 +90,9 @@ except Exception:
     fi
 done
 
-echo "[entrypoint] Running self-test (exercises all 12 MCP tools)..."
+echo "[entrypoint] Running self-test (exercises all 13 MCP tools)..."
 if python3 selftest.py; then
-    echo "[entrypoint] ✅ Self-test passed — all 12 tools verified"
+    echo "[entrypoint] ✅ Self-test passed — all 13 tools verified"
 else
     echo "[entrypoint] ⚠️  Self-test had failures (see above). Server will still start."
     echo "[entrypoint]    The failing tools will return errors to your IDE agent."

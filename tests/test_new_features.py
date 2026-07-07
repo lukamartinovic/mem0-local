@@ -67,10 +67,10 @@ def test_user():
 
 def _add_raw(content, user_id, metadata=None):
     """Helper: add memory with infer=False (no LLM needed)."""
-    args = {"content": content, "user_id": user_id, "infer": False}
+    args = {"content": content, "user_id": user_id}
     if metadata:
         args["metadata"] = metadata
-    return mcp_server.execute_tool("add_memory", args)
+    return mcp_server.execute_tool("add_raw_memory", args)
 
 
 # ── Health endpoint tests ────────────────────────────────────────────────────
