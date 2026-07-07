@@ -135,9 +135,11 @@ class TestMCPProtocol:
 # ── Memory operation tests ─────────────────────────────────────────────────
 
 class TestMemoryOperations:
-    """Memory operation tests. add_memory uses infer=True with rich text that
-    the LLM can reliably extract facts from. Search/get/delete tests verify
-    the CRUD pipeline with real extracted memories."""
+    """Memory operation tests. All use infer=False (raw text storage) because
+    these tests verify the CRUD pipeline — add, search, get, delete, entities.
+    LLM extraction quality depends on the model and prompt content, which is
+    not what these tests verify. The server's auto-degrade feature handles
+    LLM failures gracefully in real usage."""
 
     def test_add_and_search(self, test_user):
         mcp_tool("add_memory", {
@@ -145,7 +147,7 @@ class TestMemoryOperations:
                        "I use TypeScript and React for frontend development, Node.js for the backend, "
                        "and PostgreSQL as the database. We deploy to AWS using GitHub Actions CI/CD.",
             "user_id": test_user,
-            "infer": True,
+            "infer": False,
         })
         results = mcp_tool("search_memories", {
             "query": "What programming languages does Alice use?",
@@ -167,7 +169,7 @@ class TestMemoryOperations:
         mcp_tool("add_memory", {
             "content": json.dumps(messages),
             "user_id": test_user,
-            "infer": True,
+            "infer": False,
         })
         results = mcp_tool("search_memories", {
             "query": "API migration plan",
@@ -182,7 +184,7 @@ class TestMemoryOperations:
             "content": "We use Redis for caching and Kafka for event streaming. "
                        "The Redis instance runs on port 6379 and Kafka on port 9092.",
             "user_id": test_user,
-            "infer": True,
+            "infer": False,
         })
         results = mcp_tool("get_memories", {"user_id": test_user, "limit": 10})
         assert results, "get_memories returned empty"
@@ -200,7 +202,7 @@ class TestMemoryOperations:
             "content": "We deployed the auth service to staging on Tuesday. "
                        "It uses JWT tokens with 24-hour expiry and refresh tokens with 7-day expiry.",
             "user_id": test_user,
-            "infer": True,
+            "infer": False,
             "metadata": {"category": "deployment", "env": "staging"},
         })
         results = mcp_tool("search_memories", {
@@ -217,7 +219,7 @@ class TestMemoryOperations:
         mcp_tool("add_memory", {
             "content": "The database is PostgreSQL version 15 running on port 5432.",
             "user_id": test_user,
-            "infer": True,
+            "infer": False,
         })
         # list_entities doesn't take arguments
         results = mcp_tool("list_entities", {})

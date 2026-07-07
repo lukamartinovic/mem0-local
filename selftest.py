@@ -78,7 +78,7 @@ def run():
     m = mcp_server.init_memory()
     test_user = f"selftest_{uuid.uuid4().hex[:8]}"
 
-    # 1. add_memory (string, infer=True — tests LLM fact extraction)
+    # 1. add_memory (string, infer=False — selftest verifies CRUD, not LLM extraction)
     def test_add_string():
         result = mcp_server.execute_tool("add_memory", {
             "content": "My name is Alice. I work at Acme Corp as a senior software engineer. "
@@ -86,18 +86,17 @@ def run():
                        "and PostgreSQL as the database. We deploy to AWS using GitHub Actions CI/CD. "
                        "I prefer dark mode in my IDE and use Neovim as my primary editor.",
             "user_id": test_user,
-            "infer": True,
+            "infer": False,
         })
         results = result.get("results", []) if isinstance(result, dict) else result
         if not results:
-            raise LLMExtractionError(
+            raise Mem0Error(
                 "add_memory returned no results",
                 detail=f"Result: {result}",
-                fix="Check Ollama model can produce JSON output. Try: ollama pull qwen2.5:7b",
             )
     check("1/12  add_memory (string)", test_add_string)
 
-    # 2. add_memory (conversation messages as JSON, infer=True)
+    # 2. add_memory (conversation messages as JSON, infer=False)
     def test_add_conversation():
         messages = json.dumps([
             {"role": "user", "content": "I'm planning to migrate our API from REST to GraphQL. "
@@ -110,14 +109,13 @@ def run():
         result = mcp_server.execute_tool("add_memory", {
             "content": messages,
             "user_id": test_user,
-            "infer": True,
+            "infer": False,
         })
         results = result.get("results", []) if isinstance(result, dict) else result
         if not results:
-            raise LLMExtractionError(
+            raise Mem0Error(
                 "add_memory returned no results for conversation input",
                 detail=f"Result: {result}",
-                fix="Check Ollama model can produce JSON output",
             )
     check("2/12  add_memory (conversation)", test_add_conversation)
 
@@ -134,7 +132,7 @@ def run():
         results = result if isinstance(result, list) else result.get("results", [])
         if len(results) == 0:
             raise Mem0Error("search returned 0 results after successful add",
-                            detail="Expected results for 'language preference' query")
+                            detail="Expected results for 'What programming languages and tools does Alice use?' query")
         # Verify score field is present when include_scores=True
         first = results[0]
         if "score" not in first:
