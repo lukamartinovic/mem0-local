@@ -305,6 +305,44 @@ def init_memory() -> Any:
             _memory = Memory.from_config(CONFIG)
             print("[mcp_server] ✅ mem0 initialized", flush=True)
 
+            # Verify the collection was actually created. mem0 doesn't always
+            # create it eagerly — if the collection doesn't exist, force-create it.
+            try:
+                resp = urllib.request.urlopen(
+                    f"{qdrant_base}/collections/mem0", timeout=5)
+                data = json.loads(resp.read())
+                vectors = (
+                    data.get("result", {})
+                    .get("config", {})
+                    .get("params", {})
+                    .get("vectors", {})
+                )
+                actual_dim = None
+                if isinstance(vectors, dict):
+                    for key, val in vectors.items():
+                        if isinstance(val, dict) and "size" in val:
+                            actual_dim = val["size"]
+                            break
+                    if actual_dim is None and "size" in vectors:
+                        actual_dim = vectors["size"]
+                if actual_dim is not None and actual_dim == embed_dims:
+                    print(f"[mcp_server] ✅ Qdrant collection 'mem0' has correct dims: {actual_dim}", flush=True)
+                else:
+                    print(f"[mcp_server] ⚠️  Collection 'mem0' missing or wrong dims "
+                          f"(got {actual_dim}, expected {embed_dims}). Force-creating...", flush=True)
+                    _memory.vector_store.create_col(embed_dims, False)
+                    print(f"[mcp_server] ✅ Collection 'mem0' created with {embed_dims} dims", flush=True)
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    # Collection doesn't exist — mem0 didn't create it. Force-create.
+                    print("[mcp_server] ⚠️  Collection 'mem0' not found after init. Force-creating...", flush=True)
+                    _memory.vector_store.create_col(embed_dims, False)
+                    print(f"[mcp_server] ✅ Collection 'mem0' created with {embed_dims} dims", flush=True)
+                else:
+                    print(f"[mcp_server] Could not verify Qdrant collection: {e}", flush=True)
+            except Exception as e:
+                print(f"[mcp_server] Could not verify Qdrant collection: {e}", flush=True)
+
             _init_status = "ready"
             _init_error = None
         except Exception as e:
