@@ -98,10 +98,5 @@ else
     echo "[entrypoint]    The failing tools will return errors to your IDE agent."
 fi
 
-if [ "${RUN_TESTS:-0}" = "1" ]; then
-    echo "[entrypoint] RUN_TESTS=1 — running pytest instead of starting server..."
-    exec python3 -m pytest tests/ -v
-fi
-
 echo "[entrypoint] Starting MCP server..."
 exec python3 mcp_server.py
