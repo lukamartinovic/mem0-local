@@ -103,10 +103,10 @@ _llm_ping_lock = threading.Lock()
 _memory: Any = None
 
 def get_memory() -> Any:
-    global _memory
+    """Get the mem0 Memory instance. If not initialized, delegate to init_memory()
+    which handles dimension checks, collection creation, and verification."""
     if _memory is None:
-        from mem0 import Memory
-        _memory = Memory.from_config(CONFIG)
+        init_memory()
     return _memory
 
 def _chunk_text(text: str, max_chars: int = 3000, context_header: str = "") -> List[str]:
@@ -227,6 +227,21 @@ def _detect_conversation(content: str) -> Tuple[bool, Optional[List]]:
     return False, None
 
 
+def _create_collection_rest(qdrant_base: str, collection_name: str, dims: int):
+    """Create a Qdrant collection via the REST API as a fallback when
+    mem0's create_col() fails (e.g. sparse_vectors_config unsupported)."""
+    payload = json.dumps({
+        "vectors": {"size": dims, "distance": "Cosine"},
+    }).encode()
+    req = urllib.request.Request(
+        f"{qdrant_base}/collections/{collection_name}",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="PUT",
+    )
+    urllib.request.urlopen(req, timeout=10)
+
+
 def _check_and_fix_collection_dims(qdrant_base: str, embed_dims: int) -> List[str]:
     """Check Qdrant collections for dimension mismatches and delete stale ones.
 
@@ -336,7 +351,11 @@ def init_memory() -> Any:
                 if e.code == 404:
                     # Collection doesn't exist — mem0 didn't create it. Force-create.
                     print("[mcp_server] ⚠️  Collection 'mem0' not found after init. Force-creating...", flush=True)
-                    _memory.vector_store.create_col(embed_dims, False)
+                    try:
+                        _memory.vector_store.create_col(embed_dims, False)
+                    except Exception as ce:
+                        print(f"[mcp_server] create_col failed: {ce}. Trying direct REST API...", flush=True)
+                        _create_collection_rest(qdrant_base, "mem0", embed_dims)
                     print(f"[mcp_server] ✅ Collection 'mem0' created with {embed_dims} dims", flush=True)
                 else:
                     print(f"[mcp_server] Could not verify Qdrant collection: {e}", flush=True)
