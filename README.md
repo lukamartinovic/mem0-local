@@ -107,7 +107,8 @@ Restart your IDE after adding the config.
 
 | Tool | Description |
 |---|---|
-| `add_memory` | Save text or conversation history to memory (with LLM fact extraction) |
+| `add_memory` | Save text with LLM fact extraction (always infer=True, auto-chunked) |
+| `add_raw_memory` | Store text directly — for bulk imports or agent-managed extraction |
 | `search_memories` | Semantic search with relevance scores and min_score filtering |
 | `get_memories` | List memories with filters and pagination |
 | `get_memory` | Retrieve a single memory by ID |
@@ -447,12 +448,21 @@ Since local MCP doesn't have lifecycle hooks, add this to your IDE's custom inst
 ## Memory Protocol
 
 - Before answering any question, call `search_memories` with your query to
-  check for relevant past context.
-- After completing a task or learning something new, call `add_memory` to
-  store: decisions made, files modified, user preferences, patterns established.
+  check for relevant past context. Use `min_score` = 0.5 to filter low-relevance
+  results.
+- After completing a task or learning something new, store what you learned.
+  Two options:
+  - `add_memory`: sends text to the local LLM for automatic fact extraction.
+    Use for longer content where you want the model to decide what's important.
+  - `add_raw_memory`: stores text directly with no extraction. Use this when
+    YOU extract the key facts and store each one as a separate concise call.
+    This gives you full control and bypasses the local LLM entirely.
+    Example: instead of one add_memory call with a paragraph, make several
+    add_raw_memory calls — one per fact ("User uses TypeScript", "User deploys
+    to AWS", "User prefers dark mode").
 - Use `user_id` = "dev" unless in a project context, then use the project name.
-- Use `min_score` = 0.5 to filter low-relevance search results.
-- Periodically run `prune_memories` with `older_than_days` = 30 to clean up stale memories.
+- Periodically run `prune_memories` with `older_than_days` = 30 to clean up
+  stale memories.
 ```
 
 ## File structure

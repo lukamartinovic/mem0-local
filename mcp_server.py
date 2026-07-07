@@ -467,12 +467,21 @@ TOOL_DEFINITIONS = [
     {
         "name": "add_raw_memory",
         "description": "Store text directly as a memory WITHOUT LLM fact extraction. "
-                       "Use this for bulk imports, backups, or when the LLM is unavailable. "
-                       "Memories are stored as-is and searched via embeddings only (no deduplication).",
+                       "Two use cases: (1) Bulk imports, backups, or when the LLM is unavailable — "
+                       "raw text is stored as-is and searched via embeddings only. "
+                       "(2) Agent-managed extraction — you extract the key facts yourself and store "
+                       "each concise fact with this tool. This bypasses the local LLM extraction "
+                       "entirely, giving you full control over what gets stored. "
+                       "Example: instead of add_memory('I use TypeScript and React with PostgreSQL on AWS'), "
+                       "call add_raw_memory('User uses TypeScript for frontend') and "
+                       "add_raw_memory('User uses React for frontend') and "
+                       "add_raw_memory('User uses PostgreSQL as database') and "
+                       "add_raw_memory('User deploys to AWS').",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "content": {"type": "string", "description": "The text to store as-is."},
+                "content": {"type": "string", "description": "The text to store as-is. "
+                    "For agent-managed extraction, store one concise fact per call."},
                 "user_id": {"type": "string", "description": "User identifier", "default": DEFAULT_USER_ID},
                 "metadata": {"type": "object", "description": "Optional metadata to attach"},
             },
