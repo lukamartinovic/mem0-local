@@ -76,9 +76,12 @@ fi
 # ── Test ─────────────────────────────────────────────────────────────────────
 if [ "$MODE" = "test" ]; then
   echo "Running tests inside container..."
+  # Rebuild image first to pick up any code changes since last build.
+  # Without this, tests run against stale code in the cached Docker image.
+  warn "Rebuilding Docker image to pick up latest code..."
+  docker compose build mcp-server 2>&1 | tail -3
   # Run via entrypoint.sh which: waits for Ollama+Qdrant, pulls models,
   # checks dimensions, runs selftest (creates collections), then runs pytest.
-  # This ensures the LLM and Qdrant are actually working before tests try to use them.
   docker compose run --rm -e RUN_TESTS=1 mcp-server ./entrypoint.sh
   exit $?
 fi
