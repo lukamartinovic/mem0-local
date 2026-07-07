@@ -56,7 +56,13 @@ def memory():
 
 @pytest.fixture
 def test_user():
-    return f"feat_{uuid.uuid4().hex[:8]}"
+    uid = f"feat_{uuid.uuid4().hex[:8]}"
+    yield uid
+    # Cleanup: delete all memories for this test user after the test
+    try:
+        mcp_server.execute_tool("delete_all_memories", {"user_id": uid})
+    except Exception:
+        pass
 
 
 def _add_raw(content, user_id, metadata=None):

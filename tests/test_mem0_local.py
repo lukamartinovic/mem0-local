@@ -81,7 +81,13 @@ def mcp_tool(name: str, arguments: dict, req_id: int = 1) -> dict:
 
 @pytest.fixture
 def test_user():
-    return f"test_{uuid.uuid4().hex[:8]}"
+    uid = f"test_{uuid.uuid4().hex[:8]}"
+    yield uid
+    # Cleanup: delete all memories for this test user after the test
+    try:
+        mcp_tool("delete_all_memories", {"user_id": uid})
+    except Exception:
+        pass
 
 
 # ── Infrastructure tests ────────────────────────────────────────────────────
