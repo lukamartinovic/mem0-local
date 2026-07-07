@@ -135,10 +135,15 @@ class TestMCPProtocol:
 # ── Memory operation tests ─────────────────────────────────────────────────
 
 class TestMemoryOperations:
+    """Memory operation tests. All use infer=False (raw text storage, no LLM
+    extraction) because these tests verify CRUD operations, not LLM extraction
+    quality. LLM extraction is tested separately by selftest.py."""
+
     def test_add_and_search(self, test_user):
         mcp_tool("add_memory", {
             "content": "I prefer TypeScript over JavaScript and use ESLint with strict rules.",
             "user_id": test_user,
+            "infer": False,
         })
         results = mcp_tool("search_memories", {
             "query": "language preference",
@@ -157,6 +162,7 @@ class TestMemoryOperations:
         mcp_tool("add_memory", {
             "content": json.dumps(messages),
             "user_id": test_user,
+            "infer": False,
         })
         results = mcp_tool("search_memories", {
             "query": "movie preference",
@@ -167,7 +173,7 @@ class TestMemoryOperations:
             f"Expected movie preference, got: {results}"
 
     def test_get_memories(self, test_user):
-        mcp_tool("add_memory", {"content": "Test memory for listing", "user_id": test_user})
+        mcp_tool("add_memory", {"content": "Test memory for listing", "user_id": test_user, "infer": False})
         results = mcp_tool("get_memories", {"user_id": test_user, "limit": 10})
         assert results, "get_memories returned empty"
 
@@ -183,6 +189,7 @@ class TestMemoryOperations:
         mcp_tool("add_memory", {
             "content": "Deployed auth service to staging",
             "user_id": test_user,
+            "infer": False,
             "metadata": {"category": "deployment", "env": "staging"},
         })
         results = mcp_tool("search_memories", {
