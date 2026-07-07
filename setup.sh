@@ -76,7 +76,10 @@ fi
 # ── Test ─────────────────────────────────────────────────────────────────────
 if [ "$MODE" = "test" ]; then
   echo "Running tests inside container..."
-  docker compose run --rm mcp-server pytest tests/ -v
+  # Run via entrypoint.sh which: waits for Ollama+Qdrant, pulls models,
+  # checks dimensions, runs selftest (creates collections), then runs pytest.
+  # This ensures the LLM and Qdrant are actually working before tests try to use them.
+  docker compose run --rm -e RUN_TESTS=1 mcp-server ./entrypoint.sh
   exit $?
 fi
 
