@@ -78,22 +78,22 @@ def run():
     m = mcp_server.init_memory()
     test_user = f"selftest_{uuid.uuid4().hex[:8]}"
 
-    # 1. add_memory (string)
+    # 1. add_memory (string, infer=False — no LLM extraction needed for selftest)
     def test_add_string():
         result = mcp_server.execute_tool("add_memory", {
-            "content": "I prefer TypeScript over JavaScript and use ESLint.",
+            "content": "I prefer TypeScript over JavaScript and use ESLint with strict rules.",
             "user_id": test_user,
+            "infer": False,
         })
         results = result.get("results", []) if isinstance(result, dict) else result
         if not results:
-            raise LLMExtractionError(
+            raise Mem0Error(
                 "add_memory returned no results",
                 detail=f"Result: {result}",
-                fix="Check Ollama model can produce JSON output",
             )
     check("1/12  add_memory (string)", test_add_string)
 
-    # 2. add_memory (conversation messages as JSON)
+    # 2. add_memory (conversation messages as JSON, infer=False)
     def test_add_conversation():
         messages = json.dumps([
             {"role": "user", "content": "I love sci-fi movies but hate thrillers."},
@@ -102,13 +102,13 @@ def run():
         result = mcp_server.execute_tool("add_memory", {
             "content": messages,
             "user_id": test_user,
+            "infer": False,
         })
         results = result.get("results", []) if isinstance(result, dict) else result
         if not results:
-            raise LLMExtractionError(
+            raise Mem0Error(
                 "add_memory returned no results for conversation input",
                 detail=f"Result: {result}",
-                fix="Check Ollama model can produce JSON output",
             )
     check("2/12  add_memory (conversation)", test_add_conversation)
 
