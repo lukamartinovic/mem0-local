@@ -78,37 +78,46 @@ def run():
     m = mcp_server.init_memory()
     test_user = f"selftest_{uuid.uuid4().hex[:8]}"
 
-    # 1. add_memory (string, infer=False — no LLM extraction needed for selftest)
+    # 1. add_memory (string, infer=True — tests LLM fact extraction)
     def test_add_string():
         result = mcp_server.execute_tool("add_memory", {
-            "content": "I prefer TypeScript over JavaScript and use ESLint with strict rules.",
+            "content": "My name is Alice. I work at Acme Corp as a senior software engineer. "
+                       "I use TypeScript and React for frontend development, Node.js for the backend, "
+                       "and PostgreSQL as the database. We deploy to AWS using GitHub Actions CI/CD. "
+                       "I prefer dark mode in my IDE and use Neovim as my primary editor.",
             "user_id": test_user,
-            "infer": False,
+            "infer": True,
         })
         results = result.get("results", []) if isinstance(result, dict) else result
         if not results:
-            raise Mem0Error(
+            raise LLMExtractionError(
                 "add_memory returned no results",
                 detail=f"Result: {result}",
+                fix="Check Ollama model can produce JSON output. Try: ollama pull qwen2.5:7b",
             )
     check("1/12  add_memory (string)", test_add_string)
 
-    # 2. add_memory (conversation messages as JSON, infer=False)
+    # 2. add_memory (conversation messages as JSON, infer=True)
     def test_add_conversation():
         messages = json.dumps([
-            {"role": "user", "content": "I love sci-fi movies but hate thrillers."},
-            {"role": "assistant", "content": "Noted — will recommend sci-fi, avoid thrillers."},
+            {"role": "user", "content": "I'm planning to migrate our API from REST to GraphQL. "
+                                        "The main reason is to reduce over-fetching on the mobile app. "
+                                        "We'll use Apollo Server with the schema-first approach."},
+            {"role": "assistant", "content": "Noted. I'll remember you're migrating from REST to GraphQL "
+                                             "using Apollo Server with schema-first approach to solve "
+                                             "over-fetching on mobile."},
         ])
         result = mcp_server.execute_tool("add_memory", {
             "content": messages,
             "user_id": test_user,
-            "infer": False,
+            "infer": True,
         })
         results = result.get("results", []) if isinstance(result, dict) else result
         if not results:
-            raise Mem0Error(
+            raise LLMExtractionError(
                 "add_memory returned no results for conversation input",
                 detail=f"Result: {result}",
+                fix="Check Ollama model can produce JSON output",
             )
     check("2/12  add_memory (conversation)", test_add_conversation)
 
@@ -118,7 +127,7 @@ def run():
     test_memory_id = [None]
     def test_search():
         result = mcp_server.execute_tool("search_memories", {
-            "query": "language preference",
+            "query": "What programming languages and tools does Alice use?",
             "user_id": test_user,
             "include_scores": True,
         })
@@ -140,7 +149,7 @@ def run():
     def test_search_min_score():
         # Use a high min_score that filters everything — should get 0 results
         result = mcp_server.execute_tool("search_memories", {
-            "query": "language preference",
+            "query": "What programming languages and tools does Alice use?",
             "user_id": test_user,
             "min_score": 0.99,
             "include_scores": True,
