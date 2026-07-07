@@ -52,14 +52,66 @@ QDRANT_HOST = _env("MEM0_QDRANT_HOST", "qdrant")
 QDRANT_PORT = _env_int("MEM0_QDRANT_PORT", 6333)
 QDRANT_URL = f"http://{QDRANT_HOST}:{QDRANT_PORT}"
 
+
+def _detect_model_context_length(model_name: str) -> Optional[int]:
+    """Query Ollama /api/show for the model's context window size.
+
+    Returns the context_length from model_info (e.g., 32768 for qwen3.5),
+    or None if the model isn't available or the API doesn't report it.
+    """
+    try:
+        payload = json.dumps({"model": model_name}).encode()
+        req = urllib.request.Request(
+            f"{OLLAMA_URL}/api/show",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        resp = urllib.request.urlopen(req, timeout=10)
+        data = json.loads(resp.read())
+        model_info = data.get("model_info", {})
+        # model_info keys are like "llama.context_length", "qwen2.context_length", etc.
+        for key, val in model_info.items():
+            if key.endswith(".context_length") and isinstance(val, (int, float)):
+                return int(val)
+        return None
+    except Exception:
+        return None
+
+
+def _compute_max_tokens(model_name: str, configured: int) -> int:
+    """Compute the optimal max_tokens for LLM extraction.
+
+    Logic:
+    1. Query the model's context window from Ollama
+    2. Reserve ~50% for the extraction prompt (system + user + context)
+    3. Use the remaining as max_tokens, but never less than configured
+    4. If we can't detect the context length, use the configured value
+    """
+    ctx_len = _detect_model_context_length(model_name)
+    if ctx_len is None or ctx_len <= 0:
+        return configured
+
+    # Reserve half the context for input, use the rest for output
+    # The extraction prompt is typically 1500-3000 tokens depending on
+    # existing memories and input length. 50% is a safe reserve.
+    computed = ctx_len // 2
+
+    # Use the larger of computed vs configured — never go below configured
+    return max(computed, configured)
+
+
+_LLM_MODEL = _env("MEM0_LLM_MODEL", "qwen2.5:7b")
+_LLM_MAX_TOKENS = _compute_max_tokens(_LLM_MODEL, _env_int("MEM0_LLM_MAX_TOKENS", 4000))
+
 CONFIG = {
     "llm": {
         "provider": "ollama",
         "config": {
-            "model": _env("MEM0_LLM_MODEL", "qwen2.5:7b"),
+            "model": _LLM_MODEL,
             "ollama_base_url": OLLAMA_URL,
             "temperature": _env_float("MEM0_LLM_TEMPERATURE", 0.1),
-            "max_tokens": _env_int("MEM0_LLM_MAX_TOKENS", 4000),
+            "max_tokens": _LLM_MAX_TOKENS,
         },
     },
     "embedder": {
@@ -1192,6 +1244,95 @@ def execute_tool(name: str, arguments: dict) -> dict:
 
 # ── MCP HTTP server (manual JSON-RPC over HTTP) ─────────────────────────────
 
+def _render_web_ui() -> str:
+    """Render a simple HTML page for browsing memories in the database."""
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mem0-local</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, system-ui, sans-serif; background: #0d1117; color: #c9d1d9; padding: 20px; }
+h1 { color: #58a6ff; margin-bottom: 16px; font-size: 1.4rem; }
+.stats { display: flex; gap: 16px; margin-bottom: 20px; }
+.stat { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px 16px; }
+.stat-value { font-size: 1.5rem; font-weight: bold; color: #58a6ff; }
+.stat-label { font-size: 0.8rem; color: #8b949e; }
+.filter-bar { margin-bottom: 16px; }
+input, select { background: #161b22; border: 1px solid #30363d; color: #c9d1d9; padding: 8px 12px; border-radius: 6px; font-size: 0.9rem; }
+input[type=text] { width: 300px; }
+.memories { display: flex; flex-direction: column; gap: 8px; }
+.mem-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; }
+.mem-text { font-size: 0.95rem; line-height: 1.5; margin-bottom: 8px; }
+.mem-meta { display: flex; gap: 12px; font-size: 0.75rem; color: #8b949e; }
+.mem-meta span { background: #21262d; padding: 2px 8px; border-radius: 4px; }
+.empty { color: #8b949e; text-align: center; padding: 40px; }
+.error { color: #f85149; }
+a { color: #58a6ff; }
+.refresh { float: right; }
+</style>
+</head>
+<body>
+<h1>mem0-local <button class="refresh" onclick="load()">Refresh</button></h1>
+<div class="stats">
+  <div class="stat"><div class="stat-value" id="count">—</div><div class="stat-label">memories</div></div>
+  <div class="stat"><div class="stat-value" id="entities">—</div><div class="stat-label">entities</div></div>
+</div>
+<div class="filter-bar">
+  <input type="text" id="search" placeholder="Filter memories..." oninput="filter()">
+  <select id="entity-filter" onchange="filter()"><option value="">All entities</option></select>
+</div>
+<div class="memories" id="list"><div class="empty">Loading...</div></div>
+<script>
+let allMems = [];
+async function load() {
+  try {
+    const r = await fetch('/api/memories');
+    const d = await r.json();
+    allMems = d.memories || [];
+    document.getElementById('count').textContent = allMems.length;
+    document.getElementById('entities').textContent = (d.entities || []).length;
+    const sel = document.getElementById('entity-filter');
+    sel.innerHTML = '<option value="">All entities</option>';
+    (d.entities || []).forEach(e => {
+      const opt = document.createElement('option');
+      opt.value = e; opt.textContent = e; sel.appendChild(opt);
+    });
+    render(allMems);
+  } catch(e) {
+    document.getElementById('list').innerHTML = '<div class="error">Failed to load: ' + e + '</div>';
+  }
+}
+function filter() {
+  const q = document.getElementById('search').value.toLowerCase();
+  const ent = document.getElementById('entity-filter').value;
+  let filtered = allMems;
+  if (q) filtered = filtered.filter(m => JSON.stringify(m).toLowerCase().includes(q));
+  if (ent) filtered = filtered.filter(m => (m.user_id || '') === ent);
+  render(filtered);
+}
+function render(mems) {
+  const el = document.getElementById('list');
+  if (!mems.length) { el.innerHTML = '<div class="empty">No memories found</div>'; return; }
+  el.innerHTML = mems.map(m => {
+    const text = (m.memory || m.memory_text || m.text || '').replace(/</g, '&lt;');
+    const uid = m.user_id || '—';
+    const id = (m.id || m.memory_id || '').substring(0, 12);
+    const created = m.created_at ? new Date(m.created_at).toLocaleString() : '—';
+    const score = m.score != null ? m.score.toFixed(3) : '';
+    let meta = `<span>${uid}</span><span>${id}</span><span>${created}</span>`;
+    if (score) meta += `<span>score: ${score}</span>`;
+    return `<div class="mem-card"><div class="mem-text">${text}</div><div class="mem-meta">${meta}</div></div>`;
+  }).join('');
+}
+load();
+</script>
+</body>
+</html>"""
+
+
 async def http_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     """Handle a single HTTP connection. Each connection runs in its own
     asyncio task so the health endpoint stays responsive while LLM calls
@@ -1281,6 +1422,62 @@ async def http_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
                 f"Connection: close\r\n\r\n"
             ).encode()
             writer.write(header + response)
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+            return
+
+        # Web UI — simple HTML page for browsing memories
+        if method == "GET" and path == "/":
+            html = _render_web_ui()
+            response = html.encode()
+            header = (
+                f"HTTP/1.1 200 OK\r\n"
+                f"Content-Type: text/html; charset=utf-8\r\n"
+                f"Content-Length: {len(response)}\r\n"
+                f"Connection: close\r\n\r\n"
+            ).encode()
+            writer.write(header + response)
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+            return
+
+        # API for web UI — list all memories
+        if method == "GET" and path == "/api/memories":
+            try:
+                result = await asyncio.to_thread(execute_tool, "list_entities", {})
+                entities = result.get("entities", [])
+                all_memories: List[dict] = []
+                for entity in entities:
+                    try:
+                        mem_result = await asyncio.to_thread(
+                            execute_tool, "get_memories",
+                            {"user_id": entity, "limit": 100})
+                        mems = mem_result if isinstance(mem_result, list) else mem_result.get("results", [])
+                        for mem in mems:
+                            if isinstance(mem, dict):
+                                all_memories.append(mem)
+                    except Exception:
+                        pass
+                response = json.dumps({"memories": all_memories, "entities": entities},
+                                      default=str).encode()
+                header = (
+                    f"HTTP/1.1 200 OK\r\n"
+                    f"Content-Type: application/json\r\n"
+                    f"Content-Length: {len(response)}\r\n"
+                    f"Connection: close\r\n\r\n"
+                ).encode()
+                writer.write(header + response)
+            except Exception as e:
+                response = json.dumps({"error": str(e)}).encode()
+                header = (
+                    f"HTTP/1.1 500 Internal Server Error\r\n"
+                    f"Content-Type: application/json\r\n"
+                    f"Content-Length: {len(response)}\r\n"
+                    f"Connection: close\r\n\r\n"
+                ).encode()
+                writer.write(header + response)
             await writer.drain()
             writer.close()
             await writer.wait_closed()
@@ -1413,7 +1610,7 @@ async def main():
 
     server = await asyncio.start_server(http_handler, MCP_HOST, MCP_PORT)
     print(f"mem0-local MCP server listening on {MCP_HOST}:{MCP_PORT}", flush=True)
-    print(f"  LLM:      {CONFIG['llm']['config']['model']} @ {OLLAMA_URL}", flush=True)
+    print(f"  LLM:      {CONFIG['llm']['config']['model']} @ {OLLAMA_URL} (max_tokens: {_LLM_MAX_TOKENS})", flush=True)
     print(f"  Embedder: {CONFIG['embedder']['config']['model']} @ {OLLAMA_URL}", flush=True)
     print(f"  Vector:   Qdrant @ {QDRANT_URL}", flush=True)
     print(f"  Tools:    {len(TOOL_DEFINITIONS)}", flush=True)
