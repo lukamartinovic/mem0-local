@@ -104,6 +104,26 @@ def _compute_max_tokens(model_name: str, configured: int) -> int:
 _LLM_MODEL = _env("MEM0_LLM_MODEL", "qwen2.5:7b")
 _LLM_MAX_TOKENS = _compute_max_tokens(_LLM_MODEL, _env_int("MEM0_LLM_MAX_TOKENS", 4000))
 
+_DEFAULT_CUSTOM_INSTRUCTIONS = (
+    "You are extracting memories for a software engineering knowledge base. "
+    "Focus ONLY on technical facts relevant to software development:\n"
+    "- Architecture decisions and their rationale (e.g., 'Chose PostgreSQL for ACID compliance requirements')\n"
+    "- Technology choices and trade-offs (e.g., 'Using Redis for session caching, TTL 30min')\n"
+    "- API contracts and data models (e.g., 'Auth API returns JWT with 24h expiry')\n"
+    "- Infrastructure and deployment details (e.g., 'Deploys to AWS ECS via GitHub Actions')\n"
+    "- Code patterns and conventions (e.g., 'All API endpoints use snake_case, versioned with /v1/ prefix')\n"
+    "- Error patterns and fixes (e.g., 'Memory leak in UserService caused by unclosed DB connections')\n"
+    "- Performance characteristics (e.g., 'Search latency under 10ms for up to 1M vectors')\n"
+    "- Project structure and dependencies (e.g., 'Backend is Node.js, frontend is React 18 with TypeScript')\n\n"
+    "DO NOT extract:\n"
+    "- Personal preferences unrelated to engineering (food, movies, hobbies)\n"
+    "- Greetings, conversational filler, or acknowledgments\n"
+    "- Information from the few-shot examples in the system prompt (those are illustrative, not real)\n"
+    "- Meta-information about the conversation itself\n\n"
+    "Each memory should be a self-contained technical fact, 10-40 words, "
+    "understandable without context from the original conversation."
+)
+
 CONFIG = {
     "llm": {
         "provider": "ollama",
@@ -130,6 +150,7 @@ CONFIG = {
             "embedding_model_dims": _env_int("MEM0_EMBED_DIMS", 768),
         },
     },
+    "custom_instructions": _env("MEM0_CUSTOM_INSTRUCTIONS", _DEFAULT_CUSTOM_INSTRUCTIONS),
 }
 
 DEFAULT_USER_ID = _env("MEM0_DEFAULT_USER_ID", "dev")
