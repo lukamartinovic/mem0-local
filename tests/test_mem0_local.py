@@ -172,8 +172,8 @@ class TestMemoryOperations:
         assert results, "get_memories returned empty"
 
     def test_delete_all_memories(self, test_user):
-        mcp_tool("add_memory", {"content": "Memory to delete", "user_id": test_user})
-        mcp_tool("add_memory", {"content": "Another to delete", "user_id": test_user})
+        mcp_tool("add_memory", {"content": "Memory to delete", "user_id": test_user, "infer": False})
+        mcp_tool("add_memory", {"content": "Another to delete", "user_id": test_user, "infer": False})
         mcp_tool("delete_all_memories", {"user_id": test_user})
         results = mcp_tool("search_memories", {"query": "delete", "user_id": test_user})
         results_list = results if isinstance(results, list) else results.get("results", [])
@@ -196,7 +196,7 @@ class TestMemoryOperations:
             mcp_tool("nonexistent_tool", {})
 
     def test_list_entities(self, test_user):
-        mcp_tool("add_memory", {"content": "Entity test memory", "user_id": test_user})
+        mcp_tool("add_memory", {"content": "Entity test memory", "user_id": test_user, "infer": False})
         # list_entities doesn't take arguments
         results = mcp_tool("list_entities", {})
         assert "entities" in results
@@ -205,7 +205,7 @@ class TestMemoryOperations:
         assert test_user in entities or len(entities) > 0
 
     def test_delete_entities(self, test_user):
-        mcp_tool("add_memory", {"content": "Entity to delete", "user_id": test_user})
+        mcp_tool("add_memory", {"content": "Entity to delete", "user_id": test_user, "infer": False})
         mcp_tool("delete_entities", {"user_id": test_user})
         results = mcp_tool("search_memories", {"query": "entity", "user_id": test_user})
         results_list = results if isinstance(results, list) else results.get("results", [])
