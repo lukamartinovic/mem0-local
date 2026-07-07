@@ -195,14 +195,14 @@ Examples:
 
     print(f"Found {len(files)} markdown files in {args.directory}")
     print(f"User ID: {args.user_id}")
-    print(f"Chunk size: {_get_chunk_size(args.llm_model):,} chars (model: {args.llm_model})")
+    print(f"Chunk size: {_get_chunk_size():,} chars (model: {args.llm_model})")
     print()
 
     if args.dry_run:
         for f in files:
             size = f.stat().st_size
             chunks = _chunk_text(f.read_text(encoding="utf-8", errors="replace"),
-                               _get_chunk_size(args.llm_model))
+                               _get_chunk_size())
             chunk_info = f" → {len(chunks)} chunks" if len(chunks) > 1 else ""
             print(f"  {f.relative_to(args.directory)}  ({size:,} bytes){chunk_info}")
         print(f"\n{YELLOW}Dry run{NC} — {len(files)} files would be imported.")
@@ -228,7 +228,7 @@ Examples:
             "repo": args.user_id,
         }
 
-        chunk_size = _get_chunk_size(args.llm_model)
+        chunk_size = _get_chunk_size()
         context_header = f"[Document: {rel_path}][Source: docs_import]"
         chunks = _chunk_text(content, max_chars=chunk_size, context_header=context_header)
 
