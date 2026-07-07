@@ -1405,13 +1405,11 @@ def _handle_mcp_request(request: dict) -> Optional[dict]:
 
 
 async def main():
-    # Start mem0 initialization in a background thread so the HTTP server
-    # starts immediately. The health endpoint reports _init_status so the
-    # Docker healthcheck can distinguish "still loading" from "ready".
-    # This prevents the container from being marked unhealthy when the first
-    # run pulls models (which can take >300s).
-    init_thread = threading.Thread(target=init_memory, daemon=True, name="mem0-init")
-    init_thread.start()
+    # Initialize mem0 synchronously — creates Qdrant collections before
+    # accepting requests. This blocks the server from starting until the
+    # collection exists, preventing "Collection doesn't exist" 404 errors.
+    # The Docker healthcheck has start_period=600s to accommodate this.
+    init_memory()
 
     server = await asyncio.start_server(http_handler, MCP_HOST, MCP_PORT)
     print(f"mem0-local MCP server listening on {MCP_HOST}:{MCP_PORT}", flush=True)
@@ -1421,7 +1419,6 @@ async def main():
     print(f"  Tools:    {len(TOOL_DEFINITIONS)}", flush=True)
     print(f"  Health:   GET  http://{MCP_HOST}:{MCP_PORT}/health", flush=True)
     print(f"  MCP:      POST http://{MCP_HOST}:{MCP_PORT}/mcp", flush=True)
-    print(f"  Init:     running in background (health reports 'starting' until ready)", flush=True)
     async with server:
         await server.serve_forever()
 
