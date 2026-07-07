@@ -79,6 +79,20 @@ def _detect_model_context_length(model_name: str) -> Optional[int]:
         return None
 
 
+# Cache context length and chunk size at module level — avoids repeated
+# HTTP calls to Ollama on every add_memory / import_docs call.
+_CACHED_CTX_LEN: Optional[int] = None
+_CACHED_CHUNK_SIZE: Optional[int] = None
+
+
+def _get_cached_context_length() -> Optional[int]:
+    """Get the model's context length, cached after first call."""
+    global _CACHED_CTX_LEN
+    if _CACHED_CTX_LEN is None:
+        _CACHED_CTX_LEN = _detect_model_context_length(_LLM_MODEL)
+    return _CACHED_CTX_LEN
+
+
 def _compute_max_tokens(model_name: str, configured: int) -> int:
     """Compute the optimal max_tokens for LLM extraction.
 
@@ -88,7 +102,7 @@ def _compute_max_tokens(model_name: str, configured: int) -> int:
     3. Use the remaining as max_tokens, but never less than configured
     4. If we can't detect the context length, use the configured value
     """
-    ctx_len = _detect_model_context_length(model_name)
+    ctx_len = _get_cached_context_length()
     if ctx_len is None or ctx_len <= 0:
         return configured
 
@@ -273,32 +287,44 @@ _CHUNK_SIZES = {
 def _get_chunk_size() -> int:
     """Get the chunk size (in chars) for the configured LLM model.
 
-    If we detected the model's context length at startup, compute the chunk
-    size dynamically: 40% of context window * 4 chars/token. This ensures
-    chunk + extraction prompt + LLM output all fit in the context window.
+    Cached after first call to avoid repeated HTTP requests to Ollama.
+    Uses the model's detected context length to compute a safe chunk size
+    that fits alongside the extraction prompt and LLM output.
     Falls back to the hardcoded _CHUNK_SIZES table if detection failed.
     """
+    global _CACHED_CHUNK_SIZE
+    if _CACHED_CHUNK_SIZE is not None:
+        return _CACHED_CHUNK_SIZE
+
     model = CONFIG["llm"]["config"]["model"]
 
     # Try dynamic computation from detected context length
-    ctx_len = _detect_model_context_length(model)
+    ctx_len = _get_cached_context_length()
     if ctx_len and ctx_len > 0:
-        # 40% of context for the chunk, ~4 chars per token
-        computed = int(ctx_len * 0.4 * 4)
+        # Reserve ~6000 tokens for extraction prompt + LLM output
+        # chunk_tokens = ctx_len - 6000, chunk_chars = chunk_tokens * 4
+        # This leaves 6000 tokens for the system prompt + user prompt wrapper + output
+        chunk_tokens = max(1000, ctx_len - 6000)
+        computed = chunk_tokens * 4
         # Clamp to reasonable bounds: 1000–16000 chars
         computed = max(1000, min(computed, 16000))
+        _CACHED_CHUNK_SIZE = computed
         return computed
 
     # Fallback to hardcoded table
     if model in _CHUNK_SIZES:
-        return _CHUNK_SIZES[model]
+        size = _CHUNK_SIZES[model]
+        _CACHED_CHUNK_SIZE = size
+        return size
     best_match = None
     best_len = 0
     for key, size in _CHUNK_SIZES.items():
         if model.startswith(key) and len(key) > best_len:
             best_match = size
             best_len = len(key)
-    return best_match if best_match is not None else 3000
+    size = best_match if best_match is not None else 3000
+    _CACHED_CHUNK_SIZE = size
+    return size
 
 
 def _detect_conversation(content: str) -> Tuple[bool, Optional[List]]:
@@ -948,10 +974,10 @@ def execute_tool(name: str, arguments: dict) -> dict:
 
         if is_conversation or len(content) <= MAX_CHUNK_CHARS:
             # Single call — no chunking needed
-            if is_conversation:
-                result = _do_add(parsed_json, uid, metadata, infer)
-            else:
-                result = _do_add(content, uid, metadata, infer)
+            # Pass the original string content for both cases. mem0's add()
+            # expects a string; for conversations, it detects the JSON format
+            # internally and processes the messages.
+            result = _do_add(content, uid, metadata, infer)
             all_results.append(result)
         else:
             # Chunk large text at paragraph boundaries with context header
@@ -988,9 +1014,9 @@ def execute_tool(name: str, arguments: dict) -> dict:
                     tool=name,
                     detail=f"{reason}\n  Input: {len(content)} chars, {len(all_results)} chunk(s) "
                            f"(chunk size: {MAX_CHUNK_CHARS} chars for {model_name})",
-                    fix=f"(1) Use a larger model: 'ollama pull qwen3.5:9b' then update .env\n"
-                        f"    (2) Check Ollama: 'ollama serve' (runs on host, not in Docker)\n"
-                        f"    (3) Store without extraction: pass infer=false",
+                    fix=f"(1) Check model supports JSON output: 'ollama run {model_name} \"Respond with JSON: {{\\\"facts\\\": []}}\"'\n"
+                        f"    (2) Check Ollama context window: 'ollama show {model_name}' (look for num_ctx)\n"
+                        f"    (3) Use add_raw_memory instead to store without LLM extraction",
                 )
         return merged
 

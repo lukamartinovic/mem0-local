@@ -107,30 +107,58 @@ def mcp_call(method: str, params: dict, req_id: int = 1) -> dict:
         )
 
 
-def add_memory(content: str, user_id: str, metadata: dict, req_id: int) -> bool:
+def add_memory(content: str, user_id: str, metadata: dict, req_id: int,
+               max_retries: int = 2) -> bool:
     """Send a memory to the MCP server. Returns True on success, False on failure.
+    Retries on transient failures (timeouts, connection errors) with backoff.
     Prints the error message (not traceback) on failure."""
-    try:
-        resp = mcp_call("tools/call", {
-            "name": "add_memory",
-            "arguments": {
-                "content": content,
-                "user_id": user_id,
-                "metadata": metadata,
-            },
-        }, req_id)
-        result = resp.get("result", {})
-        if result.get("isError"):
-            error_text = result.get("content", [{}])[0].get("text", "Unknown error")
-            print(f"\n    {RED}✗{NC} {error_text[:300]}")
+    last_error = ""
+    for attempt in range(max_retries + 1):
+        try:
+            resp = mcp_call("tools/call", {
+                "name": "add_memory",
+                "arguments": {
+                    "content": content,
+                    "user_id": user_id,
+                    "metadata": metadata,
+                },
+            }, req_id)
+            result = resp.get("result", {})
+            if result.get("isError"):
+                error_text = result.get("content", [{}])[0].get("text", "Unknown error")
+                # Don't retry on LLM extraction errors — retrying won't help
+                if "did not extract" in error_text or "LLM" in error_text:
+                    print(f"\n    {RED}✗{NC} {error_text[:300]}")
+                    return False
+                last_error = error_text[:300]
+                if attempt < max_retries:
+                    wait = (attempt + 1) * 5
+                    print(f"\n    {YELLOW}↻{NC} Retry {attempt+1}/{max_retries} in {wait}s...", end="", flush=True)
+                    time.sleep(wait)
+                    continue
+                print(f"\n    {RED}✗{NC} {error_text[:300]}")
+                return False
+            return True
+        except DocImportError as e:
+            last_error = str(e)
+            if attempt < max_retries:
+                wait = (attempt + 1) * 5
+                print(f"\n    {YELLOW}↻{NC} Retry {attempt+1}/{max_retries} in {wait}s...", end="", flush=True)
+                time.sleep(wait)
+                continue
+            print(f"\n    {RED}✗{NC} {e}")
             return False
-        return True
-    except DocImportError as e:
-        print(f"\n    {RED}✗{NC} {e}")
-        return False
-    except Exception as e:
-        print(f"\n    {RED}✗{NC} Unexpected error: {e}")
-        return False
+        except Exception as e:
+            last_error = str(e)
+            if attempt < max_retries:
+                wait = (attempt + 1) * 5
+                print(f"\n    {YELLOW}↻{NC} Retry {attempt+1}/{max_retries} in {wait}s...", end="", flush=True)
+                time.sleep(wait)
+                continue
+            print(f"\n    {RED}✗{NC} Unexpected error: {e}")
+            return False
+    print(f"\n    {RED}✗{NC} Failed after {max_retries} retries: {last_error[:200]}")
+    return False
 
 
 # ── File discovery ───────────────────────────────────────────────────────────
