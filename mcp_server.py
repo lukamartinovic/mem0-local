@@ -887,7 +887,8 @@ def execute_tool(name: str, arguments: dict) -> dict:
         include_scores = arguments.get("include_scores", True)
         try:
             raw_results = m.search(query, filters={"user_id": uid},
-                                   limit=arguments.get("limit", 10))
+                                   top_k=arguments.get("limit", 10),
+                                   threshold=0.0)  # v3 defaults to 0.1, override to get all results
             # Normalize: mem0 may return a list or a dict with "results"
             results_list = raw_results if isinstance(raw_results, list) else raw_results.get("results", [])
 
@@ -927,8 +928,8 @@ def execute_tool(name: str, arguments: dict) -> dict:
     elif name == "get_memories":
         try:
             return m.get_all(filters={"user_id": uid},
-                             limit=arguments.get("limit", 50),
-                             page=arguments.get("page", 1))
+                             top_k=arguments.get("limit", 50),
+                             )
         except Exception as e:
             raise Mem0Error("Failed to list memories.", tool=name, detail=str(e))
 
@@ -987,7 +988,7 @@ def execute_tool(name: str, arguments: dict) -> dict:
         # Try the default user_id first
         for filter_val in [uid]:
             try:
-                all_mems = m.get_all(filters={"user_id": filter_val}, limit=500)
+                all_mems = m.get_all(filters={"user_id": filter_val}, top_k=500)
                 results = all_mems if isinstance(all_mems, list) else all_mems.get("results", [])
                 for mem in results:
                     for key in ("user_id", "agent_id", "app_id", "run_id"):
@@ -1015,7 +1016,7 @@ def execute_tool(name: str, arguments: dict) -> dict:
         if fmt not in ("json", "csv"):
             raise Mem0Error(f"Invalid format '{fmt}'. Use 'json' or 'csv'.", tool=name)
         try:
-            all_mems = m.get_all(filters={"user_id": uid}, limit=10000)
+            all_mems = m.get_all(filters={"user_id": uid}, top_k=10000)
             results_list = all_mems if isinstance(all_mems, list) else all_mems.get("results", [])
 
             # Normalize each memory to a clean export record
@@ -1075,7 +1076,7 @@ def execute_tool(name: str, arguments: dict) -> dict:
 
         # Fetch existing memory texts for duplicate detection
         try:
-            existing_mems = m.get_all(filters={"user_id": uid}, limit=10000)
+            existing_mems = m.get_all(filters={"user_id": uid}, top_k=10000)
             existing_list = existing_mems if isinstance(existing_mems, list) else existing_mems.get("results", [])
             existing_texts = set()
             for mem in existing_list:
@@ -1126,7 +1127,7 @@ def execute_tool(name: str, arguments: dict) -> dict:
         min_score = arguments.get("min_score")
 
         try:
-            all_mems = m.get_all(filters={"user_id": uid}, limit=10000)
+            all_mems = m.get_all(filters={"user_id": uid}, top_k=10000)
             results_list = all_mems if isinstance(all_mems, list) else all_mems.get("results", [])
         except Exception as e:
             raise Mem0Error("Failed to list memories for pruning.", tool=name, detail=str(e))
