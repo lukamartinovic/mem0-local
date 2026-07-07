@@ -84,6 +84,10 @@ class ContextAwareOllamaLLM:
             if "options" not in params:
                 params["options"] = {}
             params["options"]["num_ctx"] = _LLM_NUM_CTX
+            # Disable thinking mode — thinking models (qwen3.5) produce
+            # reasoning tokens before the JSON, which consumes the output
+            # budget and breaks mem0's JSON parser.
+            params["think"] = False
             return original_chat(**params)
 
         self._llm.client.chat = _chat_with_ctx
