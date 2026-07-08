@@ -876,9 +876,18 @@ def execute_tool(name: str, arguments: dict) -> dict:
                                     print(f"[dedup] Skipping — similar memory exists "
                                           f"(score={score:.3f}): {ex_text}",
                                           file=sys.stderr)
-                                    return {"results": [], "dedup_skipped": True,
-                                            "similar_to": ex.get("id"),
-                                            "similar_score": score}
+                                    return {
+                                        "results": [],
+                                        "dedup_skipped": True,
+                                        "message": (
+                                            f"Duplicate detected — a similar memory already exists "
+                                            f"(score={score:.3f}). Use add_raw_memory to force-store, "
+                                            f"or update_memory to modify the existing one."
+                                        ),
+                                        "existing_memory_id": ex.get("id"),
+                                        "existing_memory": ex.get("memory", ""),
+                                        "similarity_score": score,
+                                    }
                     except Exception:
                         pass  # dedup search failed — proceed with add
 
