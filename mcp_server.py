@@ -869,17 +869,35 @@ def execute_tool(name: str, arguments: dict) -> dict:
                 if use_infer:
                     r = result.get("results", []) if isinstance(result, dict) else result
                     if not r:
-                        # Build diagnostic from captured LLM response
-                        actual = m.llm.last_response if hasattr(m.llm, 'last_response') else None
-                        if actual is None:
-                            reason = "LLM was never called — mem0 may have skipped extraction (input too short or unrecognized format)"
-                        elif not actual or not actual.strip():
-                            reason = "LLM returned an empty response"
-                        elif "memory" not in actual:
-                            reason = f"LLM response did not contain 'memory' key. Response (first 500 chars): {actual[:500]}"
-                        else:
-                            reason = f"LLM returned JSON with 'memory' key but it was empty or unparseable. Response (first 500 chars): {actual[:500]}"
-                        chunk_errors.append(reason)
+                        # LLM extracted nothing. If the input is already a concise
+                        # fact (short text), it means the LLM saw no facts to extract
+                        # because the input IS the fact. Fall back to raw storage
+                        # so dedup can still check it against existing memories.
+                        if len(text.strip()) <= 200:
+                            print(f"[llm] No facts extracted from short input — "
+                                  f"treating as single fact for dedup check",
+                                  file=sys.stderr)
+                            try:
+                                raw_result = m.add(
+                                    text, user_id=user_id,
+                                    metadata=meta, infer=False,
+                                )
+                                result = raw_result
+                                r = result.get("results", []) if isinstance(result, dict) else result
+                            except Exception:
+                                pass  # raw fallback failed — keep original empty result
+                        if not r:
+                            # Build diagnostic from captured LLM response
+                            actual = m.llm.last_response if hasattr(m.llm, 'last_response') else None
+                            if actual is None:
+                                reason = "LLM was never called — mem0 may have skipped extraction (input too short or unrecognized format)"
+                            elif not actual or not actual.strip():
+                                reason = "LLM returned an empty response"
+                            elif "memory" not in actual:
+                                reason = f"LLM response did not contain 'memory' key. Response (first 500 chars): {actual[:500]}"
+                            else:
+                                reason = f"LLM returned JSON with 'memory' key but it was empty or unparseable. Response (first 500 chars): {actual[:500]}"
+                            chunk_errors.append(reason)
                     elif _DEDUP_ENABLED:
                         # Post-extraction dedup: for each extracted fact, search
                         # for similar existing memories. The embedding of an
