@@ -447,6 +447,11 @@ Since local MCP doesn't have lifecycle hooks, add this to your IDE's custom inst
 ```markdown
 ## Memory Protocol
 
+Add this to your IDE's custom instructions (`.cursorrules`, `CLAUDE.md`, etc.):
+
+```markdown
+## Memory Protocol
+
 - Before answering any question, call `search_memories` with your query to
   check for relevant past context. Use `min_score` = 0.5 to filter low-relevance
   results.
@@ -454,15 +459,39 @@ Since local MCP doesn't have lifecycle hooks, add this to your IDE's custom inst
   Two options:
   - `add_memory`: sends text to the local LLM for automatic fact extraction.
     Use for longer content where you want the model to decide what's important.
-  - `add_raw_memory`: stores text directly with no extraction. Use this when
-    YOU extract the key facts and store each one as a separate concise call.
-    This gives you full control and bypasses the local LLM entirely.
-    Example: instead of one add_memory call with a paragraph, make several
-    add_raw_memory calls — one per fact ("User uses TypeScript", "User deploys
-    to AWS", "User prefers dark mode").
+    Duplicates are automatically detected and skipped.
+  - `add_raw_memory`: stores text directly with no extraction and no dedup.
+    Use when YOU extract the key facts yourself.
 - Use `user_id` = "dev" unless in a project context, then use the project name.
 - Periodically run `prune_memories` with `older_than_days` = 30 to clean up
   stale memories.
+
+### Fact extraction rules for add_raw_memory
+
+When using `add_raw_memory` (agent-managed extraction), follow these rules:
+
+1. **One fact per call.** Each call stores a single, self-contained fact.
+2. **Be concise.** 10-30 words. Focused sentences embed better than paragraphs.
+   - GOOD: "Auth service uses JWT with 24-hour token expiry"
+   - BAD: "They discussed authentication, database, deployment, and CI/CD"
+3. **Be specific.** Include names, versions, ports, concrete values.
+   - GOOD: "PostgreSQL 15 runs on port 5432 with pgvector extension"
+   - BAD: "They use some database"
+4. **Preserve decisions and rationale.** Store the choice AND the reason.
+   - GOOD: "Chose PostgreSQL over MongoDB because ACID transactions required"
+5. **Use active voice.** "Auth uses JWT" not "JWT is used by auth"
+6. **Extract, don't summarize.** Atomic fact, not paraphrase of conversation.
+7. **Skip filler.** No greetings, agreement, or opinions. Only technical facts.
+8. **Scope with user_id.** Use project/team name for related facts.
+
+Example — given: "We migrated from REST to GraphQL using Apollo Server
+because mobile clients were over-fetching. Gateway runs on port 4000.
+We kept REST for webhooks."
+
+Extract into 3 calls:
+  add_raw_memory("Migrated API from REST to GraphQL using Apollo Server", user_id="api-gateway")
+  add_raw_memory("GraphQL gateway runs on port 4000", user_id="api-gateway")
+  add_raw_memory("REST endpoints retained for webhooks only", user_id="api-gateway")
 ```
 
 ## File structure
