@@ -988,11 +988,15 @@ def execute_tool(name: str, arguments: dict) -> dict:
                 result = _do_add(chunk, uid, chunk_meta, infer)
                 all_results.append(result)
 
-        # Merge results
-        merged = {"results": [], "chunks": len(all_results)}
+        # Merge results, separating dedup entries from stored memories
+        merged = {"results": [], "dedup_skipped": [], "chunks": len(all_results)}
         for r in all_results:
             if isinstance(r, dict) and "results" in r:
-                merged["results"].extend(r["results"])
+                for item in r["results"]:
+                    if isinstance(item, dict) and item.get("dedup_skipped"):
+                        merged["dedup_skipped"].append(item)
+                    else:
+                        merged["results"].append(item)
             elif isinstance(r, list):
                 merged["results"].extend(r)
             elif r:
@@ -1000,17 +1004,24 @@ def execute_tool(name: str, arguments: dict) -> dict:
 
         # Check for silent failures (only when LLM extraction was expected)
         if infer:
-            total = len(merged.get("results", []))
-            if total == 0:
+            stored = len(merged.get("results", []))
+            skipped = len(merged.get("dedup_skipped", []))
+            if stored == 0 and skipped == 0:
                 reason = "; ".join(chunk_errors) if chunk_errors else "No facts were extracted from the input"
                 raise LLMExtractionError(
                     f"Memory could not be saved. The LLM ({model_name}) did not extract any facts.",
                     tool=name,
                     detail=f"{reason}\n  Input: {len(content)} chars, {len(all_results)} chunk(s) "
                            f"(chunk size: {MAX_CHUNK_CHARS} chars for {model_name})",
-                    fix=f"(1) Check model supports JSON output: 'ollama run {model_name} \"Respond with JSON: {{\\\"facts\\\": []}}\"'\n"
+                    fix=f"(1) Check model supports JSON output: 'ollama run {model_name} \"Respond with JSON: {{\"facts\": []}}\"'\n"
                         f"    (2) Check Ollama context window: 'ollama show {model_name}' (look for num_ctx)\n"
                         f"    (3) Use add_raw_memory instead to store without LLM extraction",
+                )
+            if stored == 0 and skipped > 0:
+                # All extracted facts were duplicates — not an error, just nothing new
+                merged["message"] = (
+                    f"All {skipped} extracted fact(s) were duplicates of existing memories. "
+                    f"See dedup_skipped for details."
                 )
         return merged
 
