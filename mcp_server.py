@@ -63,12 +63,6 @@ _LLM_MODEL = _env("MEM0_LLM_MODEL", "qwen2.5:7b")
 _LLM_MAX_TOKENS = _env_int("MEM0_LLM_MAX_TOKENS", 4000)
 _LLM_NUM_CTX = _env_int("MEM0_LLM_CONTEXT_LENGTH", 32768)
 
-# Semantic deduplication — search for similar memories before adding.
-# Set MEM0_DEDUP_ENABLED=false to disable.
-_DEDUP_ENABLED = _env("MEM0_DEDUP_ENABLED", "true").lower() in ("1", "true", "yes")
-# Similarity threshold for dedup (0.0–1.0). Higher = stricter (only very close matches).
-_DEDUP_THRESHOLD = _env_float("MEM0_DEDUP_THRESHOLD", 0.85)
-
 
 class ContextAwareOllamaLLM:
     """Wrapper around mem0's OllamaLLM that:
@@ -464,8 +458,6 @@ TOOL_DEFINITIONS = [
         "name": "add_memory",
         "description": "Save text or conversation history to persistent memory with LLM fact extraction. "
                        "Large content is automatically chunked based on the model's context window. "
-                       "Duplicate detection: after extraction, each fact is checked against existing "
-                       "memories — near-duplicates are skipped and the existing memory is returned. "
                        "Use this to remember facts, decisions, user preferences, "
                        "code patterns, or anything worth recalling later.",
         "inputSchema": {
@@ -480,11 +472,10 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "add_raw_memory",
-        "description": "Store text directly as a memory WITHOUT LLM fact extraction or dedup checks. "
+        "description": "Store text directly as a memory WITHOUT LLM fact extraction. "
                        "Use for: (1) bulk imports/backups, (2) agent-managed extraction — you extract "
                        "facts yourself and store each as a concise 10-30 word sentence (one fact per call, "
                        "include specific names/versions/ports, preserve rationale, use active voice). "
-                       "Unlike add_memory, this does NOT check for duplicates. "
                        "Set user_id to the project/team name for scoping.",
         "inputSchema": {
             "type": "object",
@@ -855,99 +846,24 @@ def execute_tool(name: str, arguments: dict) -> dict:
         is_conversation, parsed_json = _detect_conversation(content)
 
         def _do_add(text, user_id, meta, use_infer):
-            """Call m.add() with LLM response logging and post-extraction dedup.
-
-            For infer=True: let the LLM extract facts first, then for each
-            extracted fact, search for similar existing memories. If a close
-            match is found, delete the new one and return the existing one.
-            This is more accurate than pre-extraction dedup because the
-            embeddings of extracted facts match stored facts, not raw input.
-            """
+            """Call m.add() with LLM response logging for diagnostics."""
             try:
                 result = m.add(text, user_id=user_id, metadata=meta, infer=use_infer)
 
                 if use_infer:
                     r = result.get("results", []) if isinstance(result, dict) else result
                     if not r:
-                        # LLM extracted nothing. If the input is already a concise
-                        # fact (short text), it means the LLM saw no facts to extract
-                        # because the input IS the fact. Fall back to raw storage
-                        # so dedup can still check it against existing memories.
-                        if len(text.strip()) <= 200:
-                            print(f"[llm] No facts extracted from short input — "
-                                  f"treating as single fact for dedup check",
-                                  file=sys.stderr)
-                            try:
-                                raw_result = m.add(
-                                    text, user_id=user_id,
-                                    metadata=meta, infer=False,
-                                )
-                                result = raw_result
-                                r = result.get("results", []) if isinstance(result, dict) else result
-                            except Exception:
-                                pass  # raw fallback failed — keep original empty result
-                        if not r:
-                            # Build diagnostic from captured LLM response
-                            actual = m.llm.last_response if hasattr(m.llm, 'last_response') else None
-                            if actual is None:
-                                reason = "LLM was never called — mem0 may have skipped extraction (input too short or unrecognized format)"
-                            elif not actual or not actual.strip():
-                                reason = "LLM returned an empty response"
-                            elif "memory" not in actual:
-                                reason = f"LLM response did not contain 'memory' key. Response (first 500 chars): {actual[:500]}"
-                            else:
-                                reason = f"LLM returned JSON with 'memory' key but it was empty or unparseable. Response (first 500 chars): {actual[:500]}"
-                            chunk_errors.append(reason)
-                    elif _DEDUP_ENABLED:
-                        # Post-extraction dedup: for each extracted fact, search
-                        # for similar existing memories. The embedding of an
-                        # extracted fact matches stored facts much better than
-                        # the raw input text.
-                        deduped = []
-                        for mem in r:
-                            mem_text = mem.get("memory", "")
-                            mem_id = mem.get("id", "")
-                            if not mem_text:
-                                deduped.append(mem)
-                                continue
-                            try:
-                                existing = m.search(
-                                    mem_text, user_id=user_id,
-                                    top_k=3, threshold=_DEDUP_THRESHOLD,
-                                )
-                                duplicate = None
-                                if existing and "results" in existing:
-                                    for ex in existing["results"]:
-                                        if ex.get("id") != mem_id and ex.get("score", 0) >= _DEDUP_THRESHOLD:
-                                            duplicate = ex
-                                            break
-                                if duplicate:
-                                    # Delete the new memory, keep the existing one
-                                    try:
-                                        m.delete(mem_id)
-                                    except Exception:
-                                        pass
-                                    print(f"[dedup] Removed duplicate — similar memory exists "
-                                          f"(score={duplicate.get('score', 0):.3f}): "
-                                          f"{duplicate.get('memory', '')[:80]}",
-                                          file=sys.stderr)
-                                    deduped.append({
-                                        "dedup_skipped": True,
-                                        "message": (
-                                            f"Duplicate detected — a similar memory already exists "
-                                            f"(score={duplicate.get('score', 0):.3f}). "
-                                            f"Use add_raw_memory to force-store, or update_memory to modify."
-                                        ),
-                                        "existing_memory_id": duplicate.get("id"),
-                                        "existing_memory": duplicate.get("memory", ""),
-                                        "similarity_score": duplicate.get("score", 0),
-                                        "new_memory_text": mem_text,
-                                    })
-                                else:
-                                    deduped.append(mem)
-                            except Exception:
-                                deduped.append(mem)  # dedup search failed — keep the memory
-                        result["results"] = deduped
+                        # Build diagnostic from captured LLM response
+                        actual = m.llm.last_response if hasattr(m.llm, 'last_response') else None
+                        if actual is None:
+                            reason = "LLM was never called — mem0 may have skipped extraction (input too short or unrecognized format)"
+                        elif not actual or not actual.strip():
+                            reason = "LLM returned an empty response"
+                        elif "memory" not in actual:
+                            reason = f"LLM response did not contain 'memory' key. Response (first 500 chars): {actual[:500]}"
+                        else:
+                            reason = f"LLM returned JSON with 'memory' key but it was empty or unparseable. Response (first 500 chars): {actual[:500]}"
+                        chunk_errors.append(reason)
 
                 return result
 
@@ -999,15 +915,11 @@ def execute_tool(name: str, arguments: dict) -> dict:
                 result = _do_add(chunk, uid, chunk_meta, infer)
                 all_results.append(result)
 
-        # Merge results, separating dedup entries from stored memories
-        merged = {"results": [], "dedup_skipped": [], "chunks": len(all_results)}
+        # Merge results
+        merged = {"results": [], "chunks": len(all_results)}
         for r in all_results:
             if isinstance(r, dict) and "results" in r:
-                for item in r["results"]:
-                    if isinstance(item, dict) and item.get("dedup_skipped"):
-                        merged["dedup_skipped"].append(item)
-                    else:
-                        merged["results"].append(item)
+                merged["results"].extend(r["results"])
             elif isinstance(r, list):
                 merged["results"].extend(r)
             elif r:
@@ -1015,24 +927,17 @@ def execute_tool(name: str, arguments: dict) -> dict:
 
         # Check for silent failures (only when LLM extraction was expected)
         if infer:
-            stored = len(merged.get("results", []))
-            skipped = len(merged.get("dedup_skipped", []))
-            if stored == 0 and skipped == 0:
+            total = len(merged.get("results", []))
+            if total == 0:
                 reason = "; ".join(chunk_errors) if chunk_errors else "No facts were extracted from the input"
                 raise LLMExtractionError(
                     f"Memory could not be saved. The LLM ({model_name}) did not extract any facts.",
                     tool=name,
                     detail=f"{reason}\n  Input: {len(content)} chars, {len(all_results)} chunk(s) "
                            f"(chunk size: {MAX_CHUNK_CHARS} chars for {model_name})",
-                    fix=f"(1) Check model supports JSON output: 'ollama run {model_name} \"Respond with JSON: {{\"facts\": []}}\"'\n"
+                    fix=f"(1) Check model supports JSON output: 'ollama run {model_name} \"Respond with JSON: {{\\\"facts\\\": []}}\"'\n"
                         f"    (2) Check Ollama context window: 'ollama show {model_name}' (look for num_ctx)\n"
                         f"    (3) Use add_raw_memory instead to store without LLM extraction",
-                )
-            if stored == 0 and skipped > 0:
-                # All extracted facts were duplicates — not an error, just nothing new
-                merged["message"] = (
-                    f"All {skipped} extracted fact(s) were duplicates of existing memories. "
-                    f"See dedup_skipped for details."
                 )
         return merged
 
