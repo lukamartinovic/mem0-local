@@ -464,6 +464,8 @@ TOOL_DEFINITIONS = [
         "name": "add_memory",
         "description": "Save text or conversation history to persistent memory with LLM fact extraction. "
                        "Large content is automatically chunked based on the model's context window. "
+                       "Duplicate detection: after extraction, each fact is checked against existing "
+                       "memories — near-duplicates are skipped and the existing memory is returned. "
                        "Use this to remember facts, decisions, user preferences, "
                        "code patterns, or anything worth recalling later.",
         "inputSchema": {
@@ -478,12 +480,14 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "add_raw_memory",
-        "description": "Store text directly as a memory WITHOUT LLM fact extraction. "
+        "description": "Store text directly as a memory WITHOUT LLM fact extraction or dedup checks. "
                        "Two use cases: (1) Bulk imports, backups, or when the LLM is unavailable — "
                        "raw text is stored as-is and searched via embeddings only. "
                        "(2) Agent-managed extraction — you extract the key facts yourself and store "
                        "each concise fact with this tool. This bypasses the local LLM extraction "
                        "entirely, giving you full control over what gets stored. "
+                       "Note: unlike add_memory, this does NOT check for duplicates — every call "
+                       "stores a new memory regardless of existing similar ones. "
                        "Example: instead of add_memory('I use TypeScript and React with PostgreSQL on AWS'), "
                        "call add_raw_memory('User uses TypeScript for frontend') and "
                        "add_raw_memory('User uses React for frontend') and "
