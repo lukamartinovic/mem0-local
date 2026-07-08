@@ -858,39 +858,15 @@ def execute_tool(name: str, arguments: dict) -> dict:
         is_conversation, parsed_json = _detect_conversation(content)
 
         def _do_add(text, user_id, meta, use_infer):
-            """Call m.add() with LLM response logging and semantic dedup."""
-            try:
-                # Semantic dedup: search for similar existing memories before adding.
-                # Only for infer=True (LLM extraction) — raw storage skips this.
-                if use_infer and _DEDUP_ENABLED:
-                    try:
-                        existing = m.search(
-                            text, user_id=user_id,
-                            top_k=3, threshold=_DEDUP_THRESHOLD,
-                        )
-                        if existing and "results" in existing:
-                            for ex in existing["results"]:
-                                score = ex.get("score", 0)
-                                if score >= _DEDUP_THRESHOLD:
-                                    ex_text = ex.get("memory", "")[:80]
-                                    print(f"[dedup] Skipping — similar memory exists "
-                                          f"(score={score:.3f}): {ex_text}",
-                                          file=sys.stderr)
-                                    return {
-                                        "results": [],
-                                        "dedup_skipped": True,
-                                        "message": (
-                                            f"Duplicate detected — a similar memory already exists "
-                                            f"(score={score:.3f}). Use add_raw_memory to force-store, "
-                                            f"or update_memory to modify the existing one."
-                                        ),
-                                        "existing_memory_id": ex.get("id"),
-                                        "existing_memory": ex.get("memory", ""),
-                                        "similarity_score": score,
-                                    }
-                    except Exception:
-                        pass  # dedup search failed — proceed with add
+            """Call m.add() with LLM response logging and post-extraction dedup.
 
+            For infer=True: let the LLM extract facts first, then for each
+            extracted fact, search for similar existing memories. If a close
+            match is found, delete the new one and return the existing one.
+            This is more accurate than pre-extraction dedup because the
+            embeddings of extracted facts match stored facts, not raw input.
+            """
+            try:
                 result = m.add(text, user_id=user_id, metadata=meta, infer=use_infer)
 
                 if use_infer:
@@ -907,6 +883,56 @@ def execute_tool(name: str, arguments: dict) -> dict:
                         else:
                             reason = f"LLM returned JSON with 'memory' key but it was empty or unparseable. Response (first 500 chars): {actual[:500]}"
                         chunk_errors.append(reason)
+                    elif _DEDUP_ENABLED:
+                        # Post-extraction dedup: for each extracted fact, search
+                        # for similar existing memories. The embedding of an
+                        # extracted fact matches stored facts much better than
+                        # the raw input text.
+                        deduped = []
+                        for mem in r:
+                            mem_text = mem.get("memory", "")
+                            mem_id = mem.get("id", "")
+                            if not mem_text:
+                                deduped.append(mem)
+                                continue
+                            try:
+                                existing = m.search(
+                                    mem_text, user_id=user_id,
+                                    top_k=3, threshold=_DEDUP_THRESHOLD,
+                                )
+                                duplicate = None
+                                if existing and "results" in existing:
+                                    for ex in existing["results"]:
+                                        if ex.get("id") != mem_id and ex.get("score", 0) >= _DEDUP_THRESHOLD:
+                                            duplicate = ex
+                                            break
+                                if duplicate:
+                                    # Delete the new memory, keep the existing one
+                                    try:
+                                        m.delete(mem_id)
+                                    except Exception:
+                                        pass
+                                    print(f"[dedup] Removed duplicate — similar memory exists "
+                                          f"(score={duplicate.get('score', 0):.3f}): "
+                                          f"{duplicate.get('memory', '')[:80]}",
+                                          file=sys.stderr)
+                                    deduped.append({
+                                        "dedup_skipped": True,
+                                        "message": (
+                                            f"Duplicate detected — a similar memory already exists "
+                                            f"(score={duplicate.get('score', 0):.3f}). "
+                                            f"Use add_raw_memory to force-store, or update_memory to modify."
+                                        ),
+                                        "existing_memory_id": duplicate.get("id"),
+                                        "existing_memory": duplicate.get("memory", ""),
+                                        "similarity_score": duplicate.get("score", 0),
+                                        "new_memory_text": mem_text,
+                                    })
+                                else:
+                                    deduped.append(mem)
+                            except Exception:
+                                deduped.append(mem)  # dedup search failed — keep the memory
+                        result["results"] = deduped
 
                 return result
 
