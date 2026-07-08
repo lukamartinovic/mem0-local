@@ -34,6 +34,8 @@ services:
       MEM0_LLM_TEMPERATURE: "0.1"
       MEM0_LLM_MAX_TOKENS: "4000"
       MEM0_LLM_CONTEXT_LENGTH: "32768"
+      MEM0_DEDUP_ENABLED: "true"
+      MEM0_DEDUP_THRESHOLD: "0.85"
       MEM0_DEFAULT_USER_ID: ${MEM0_DEFAULT_USER_ID:-dev}
     extra_hosts:
       - "host.docker.internal:host-gateway"

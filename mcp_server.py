@@ -63,6 +63,12 @@ _LLM_MODEL = _env("MEM0_LLM_MODEL", "qwen2.5:7b")
 _LLM_MAX_TOKENS = _env_int("MEM0_LLM_MAX_TOKENS", 4000)
 _LLM_NUM_CTX = _env_int("MEM0_LLM_CONTEXT_LENGTH", 32768)
 
+# Semantic deduplication — search for similar memories before adding.
+# Set MEM0_DEDUP_ENABLED=false to disable.
+_DEDUP_ENABLED = _env("MEM0_DEDUP_ENABLED", "true").lower() in ("1", "true", "yes")
+# Similarity threshold for dedup (0.0–1.0). Higher = stricter (only very close matches).
+_DEDUP_THRESHOLD = _env_float("MEM0_DEDUP_THRESHOLD", 0.85)
+
 
 class ContextAwareOllamaLLM:
     """Wrapper around mem0's OllamaLLM that:
@@ -852,8 +858,30 @@ def execute_tool(name: str, arguments: dict) -> dict:
         is_conversation, parsed_json = _detect_conversation(content)
 
         def _do_add(text, user_id, meta, use_infer):
-            """Call m.add() with LLM response logging for diagnostics."""
+            """Call m.add() with LLM response logging and semantic dedup."""
             try:
+                # Semantic dedup: search for similar existing memories before adding.
+                # Only for infer=True (LLM extraction) — raw storage skips this.
+                if use_infer and _DEDUP_ENABLED:
+                    try:
+                        existing = m.search(
+                            text, user_id=user_id,
+                            top_k=3, threshold=_DEDUP_THRESHOLD,
+                        )
+                        if existing and "results" in existing:
+                            for ex in existing["results"]:
+                                score = ex.get("score", 0)
+                                if score >= _DEDUP_THRESHOLD:
+                                    ex_text = ex.get("memory", "")[:80]
+                                    print(f"[dedup] Skipping — similar memory exists "
+                                          f"(score={score:.3f}): {ex_text}",
+                                          file=sys.stderr)
+                                    return {"results": [], "dedup_skipped": True,
+                                            "similar_to": ex.get("id"),
+                                            "similar_score": score}
+                    except Exception:
+                        pass  # dedup search failed — proceed with add
+
                 result = m.add(text, user_id=user_id, metadata=meta, infer=use_infer)
 
                 if use_infer:
