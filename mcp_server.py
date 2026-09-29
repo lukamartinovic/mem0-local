@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-mem0-local MCP server — HTTP transport.
+mem0-local MCP server — HTTP transport, single container (Qdrant binary + server).
 
-Runs inside a Docker container alongside Ollama and Qdrant.
-Exposes 12 memory tools via MCP over HTTP (Streamable HTTP transport).
+NO extraction LLM. Fact inference is the calling agent's responsibility:
+the agent extracts facts itself (it has a powerful LLM) and stores each
+concise fact as its own memory. Embeddings run locally via fastembed (ONNX).
 
-Environment variables (all have sensible defaults for Docker Compose):
-    MEM0_LLM_MODEL          default: qwen2.5:7b
-    MEM0_EMBED_MODEL        default: nomic-embed-text
-    MEM0_OLLAMA_URL          default: http://host.docker.internal:11434
-    MEM0_QDRANT_HOST         default: qdrant
+Environment variables (all have sensible defaults for the single container):
+    MEM0_EMBED_MODEL        default: nomic-ai/nomic-embed-text-v1.5
+    MEM0_EMBED_DIMS         default: 768 (must match existing Qdrant collection)
+    MEM0_CHUNK_CHARS        default: 3000 (verbatim-storage chunk size)
+    MEM0_QDRANT_HOST         default: 127.0.0.1 (Qdrant runs in the same container)
     MEM0_QDRANT_PORT         default: 6333
-    MEM0_LLM_TEMPERATURE     default: 0.1
-    MEM0_LLM_MAX_TOKENS      default: 2000
     MEM0_DEFAULT_USER_ID     default: dev
     MCP_HOST                 default: 0.0.0.0
     MCP_PORT                 default: 8765
@@ -47,138 +46,44 @@ def _env_float(key: str, default: float) -> float:
     except (ValueError, TypeError):
         return default
 
-OLLAMA_URL = _env("MEM0_OLLAMA_URL", "http://host.docker.internal:11434")
-QDRANT_HOST = _env("MEM0_QDRANT_HOST", "qdrant")
+QDRANT_HOST = _env("MEM0_QDRANT_HOST", "127.0.0.1")
 QDRANT_PORT = _env_int("MEM0_QDRANT_PORT", 6333)
 QDRANT_URL = f"http://{QDRANT_HOST}:{QDRANT_PORT}"
 
-
-# ── LLM setup ───────────────────────────────────────────────────────────────
-# We subclass mem0's OllamaLLM to pass num_ctx (context window size) to Ollama.
-# Without this, Ollama defaults to 2048-4096 context and truncates the
-# ~8000-token extraction prompt, causing silent extraction failures.
-# Configurable via MEM0_LLM_CONTEXT_LENGTH env var (default: 32768).
-
-_LLM_MODEL = _env("MEM0_LLM_MODEL", "qwen2.5:7b")
-_LLM_MAX_TOKENS = _env_int("MEM0_LLM_MAX_TOKENS", 4000)
-_LLM_NUM_CTX = _env_int("MEM0_LLM_CONTEXT_LENGTH", 32768)
-
-
-class ContextAwareOllamaLLM:
-    """Wrapper around mem0's OllamaLLM that:
-    1. Injects num_ctx into the Ollama options dict (mem0 doesn't expose it)
-    2. Logs LLM responses to stderr for debugging extraction failures
-
-    Without num_ctx, Ollama defaults to 2048-4096 context and truncates the
-    ~8000-token extraction prompt, causing silent extraction failures.
-    """
-
-    def __init__(self, original_llm):
-        self._llm = original_llm
-        self.last_response = None
-
-    def generate_response(self, *args, **kwargs):
-        original_chat = self._llm.client.chat
-
-        def _chat_with_ctx(**params):
-            if "options" not in params:
-                params["options"] = {}
-            params["options"]["num_ctx"] = _LLM_NUM_CTX
-            # Disable thinking mode — thinking models (qwen3.5) produce
-            # reasoning tokens before the JSON, which consumes the output
-            # budget and breaks mem0's JSON parser.
-            params["think"] = False
-            return original_chat(**params)
-
-        self._llm.client.chat = _chat_with_ctx
-        try:
-            response = self._llm.generate_response(*args, **kwargs)
-        finally:
-            self._llm.client.chat = original_chat
-
-        # Log the response for debugging
-        self.last_response = response
-        if response:
-            preview = response[:200].replace("\n", "\\n")
-            print(f"[llm] Response ({len(response)} chars): {preview}...", file=sys.stderr)
-        else:
-            print(f"[llm] Response was empty/null", file=sys.stderr)
-
-        return response
-
-    def __getattr__(self, name):
-        return getattr(self._llm, name)
-
-_DEFAULT_CUSTOM_INSTRUCTIONS = (
-    "You are extracting memories for a software engineering knowledge base. "
-    "Focus ONLY on technical facts relevant to software development:\n"
-    "- Architecture decisions and their rationale (e.g., 'Chose PostgreSQL for ACID compliance requirements')\n"
-    "- Technology choices and trade-offs (e.g., 'Using Redis for session caching, TTL 30min')\n"
-    "- API contracts and data models (e.g., 'Auth API returns JWT with 24h expiry')\n"
-    "- Infrastructure and deployment details (e.g., 'Deploys to AWS ECS via GitHub Actions')\n"
-    "- Code patterns and conventions (e.g., 'All API endpoints use snake_case, versioned with /v1/ prefix')\n"
-    "- Error patterns and fixes (e.g., 'Memory leak in UserService caused by unclosed DB connections')\n"
-    "- Performance characteristics (e.g., 'Search latency under 10ms for up to 1M vectors')\n"
-    "- Project structure and dependencies (e.g., 'Backend is Node.js, frontend is React 18 with TypeScript')\n\n"
-    "DO NOT extract:\n"
-    "- Personal preferences unrelated to engineering (food, movies, hobbies)\n"
-    "- Greetings, conversational filler, or acknowledgments\n"
-    "- Information from the few-shot examples in the system prompt (those are illustrative, not real)\n"
-    "- Meta-information about the conversation itself\n\n"
-    "Each memory should be a self-contained technical fact, 10-40 words, "
-    "understandable without context from the original conversation."
-)
-
-CONFIG = {
-    "llm": {
-        "provider": "ollama",
-        "config": {
-            "model": _LLM_MODEL,
-            "ollama_base_url": OLLAMA_URL,
-            "temperature": _env_float("MEM0_LLM_TEMPERATURE", 0.1),
-            "max_tokens": _LLM_MAX_TOKENS,
-        },
-    },
-    "embedder": {
-        "provider": "ollama",
-        "config": {
-            "model": _env("MEM0_EMBED_MODEL", "nomic-embed-text"),
-            "ollama_base_url": OLLAMA_URL,
-            "embedding_dims": _env_int("MEM0_EMBED_DIMS", 768),
-        },
-    },
-    "vector_store": {
-        "provider": "qdrant",
-        "config": {
-            "host": _env("MEM0_QDRANT_HOST", "qdrant"),
-            "port": _env_int("MEM0_QDRANT_PORT", 6333),
-            "embedding_model_dims": _env_int("MEM0_EMBED_DIMS", 768),
-        },
-    },
-    "custom_instructions": _env("MEM0_CUSTOM_INSTRUCTIONS", _DEFAULT_CUSTOM_INSTRUCTIONS),
-}
+EMBED_MODEL = _env("MEM0_EMBED_MODEL", "nomic-ai/nomic-embed-text-v1.5")
+EMBED_DIMS = _env_int("MEM0_EMBED_DIMS", 768)
+CHUNK_CHARS = _env_int("MEM0_CHUNK_CHARS", 3000)
 
 DEFAULT_USER_ID = _env("MEM0_DEFAULT_USER_ID", "dev")
 MCP_HOST = _env("MCP_HOST", "0.0.0.0")
 MCP_PORT = _env_int("MCP_PORT", 8765)
 
-# ── Lazy initialization ──────────────────────────────────────────────────────
+# ── Initialization lifecycle ─────────────────────────────────────────────────
 
 # Initialization lifecycle for the health endpoint.
 # "starting" → "initializing" → "ready" or "error"
 _init_status = "starting"
 _init_error: Optional[str] = None
 
-# Cache for the LLM model status ping (Feature 5).
-# Updated by _ping_llm_model() at most every 30 seconds.
-_LLM_PING_CACHE_TTL = 30.0
-_llm_ping_cache: dict = {
-    "status": None,        # "loaded" | "unloaded" | "unreachable"
-    "checked_at": 0.0,     # monotonic timestamp of last check
-}
-_llm_ping_lock = threading.Lock()
-
 _memory: Any = None
+
+class NoExtractionLLM:
+    """Sentinel LLM that makes accidental LLM extraction IMPOSSIBLE.
+
+    This server has no extraction LLM: fact inference is the calling agent's
+    job (agent extracts its own facts, stores each via add_raw_memory /
+    add_verbatim). mem0's add() is only ever called with infer=False, so this
+    class should never run; if code paths change and it does, it fails loudly
+    instead of silently calling a cloud API.
+    """
+
+    def generate_response(self, *args, **kwargs):  #pragma: no cover
+        raise Mem0Error(
+            "LLM extraction was invoked, but this server has no extraction LLM.",
+            detail="Fact inference is the agent's responsibility: extract facts yourself and call add_raw_memory (or add_verbatim for verbatim storage).",
+            fix="Never call add() with infer=True. Use add_raw_memory / add_verbatim.",
+        )
+
 
 def get_memory() -> Any:
     """Get the mem0 Memory instance. If not initialized, delegate to init_memory()
@@ -189,8 +94,8 @@ def get_memory() -> Any:
 
 def _chunk_text(text: str, max_chars: int = 3000, context_header: str = "") -> List[str]:
     """Split text into chunks at paragraph boundaries, each under max_chars.
-    If context_header is provided, it's prepended to each chunk so the LLM
-    knows what document the chunk belongs to.
+    If context_header is provided, it's prepended to each chunk so each
+    stored chunk knows what document it came from.
 
     Splits at \\n\\n (paragraphs) → \\n (lines) → word boundaries, so even
     text with no structure (single long line) is correctly chunked."""
@@ -260,47 +165,9 @@ def _chunk_text(text: str, max_chars: int = 3000, context_header: str = "") -> L
     return chunks
 
 
-# Chunk size based on the configured context window.
-# The extraction prompt is ~6000 tokens. chunk + prompt must fit in num_ctx.
-# chunk_chars = (num_ctx - 6000) * 4 chars/token, clamped to 1000–16000.
-_CHUNK_SIZES = {
-    "qwen2.5:3b": 1500,
-    "qwen2.5:7b": 3000,
-    "qwen3.5:9b": 4000,
-    "gemma4:12b": 5000,
-    "qwen3.5:27b": 8000,
-}
-
-
 def _get_chunk_size() -> int:
-    """Get the chunk size (in chars) for the configured LLM model.
-
-    Computed from MEM0_LLM_CONTEXT_LENGTH: (context - 6000) * 4, clamped.
-    Falls back to the hardcoded _CHUNK_SIZES table for the model.
-    """
-    # Compute from context length: reserve 6000 tokens for prompt + output
-    chunk_tokens = max(1000, _LLM_NUM_CTX - 6000)
-    computed = max(1000, min(chunk_tokens * 4, 16000))
-    return computed
-
-
-def _detect_conversation(content: str) -> Tuple[bool, Optional[List]]:
-    """Detect if content is a JSON array of {role, content} messages.
-
-    Returns (is_conversation, parsed_messages) — if not a conversation,
-    returns (False, None). This is extracted from add_memory so it can
-    be tested independently of the LLM/Qdrant pipeline.
-    """
-    if not content or not isinstance(content, str):
-        return False, None
-    try:
-        parsed = json.loads(content)
-        if isinstance(parsed, list) and len(parsed) > 0 and \
-                all(isinstance(msg, dict) and "role" in msg for msg in parsed):
-            return True, parsed
-    except (json.JSONDecodeError, TypeError):
-        pass
-    return False, None
+    """Verbatim-storage chunk size (chars). Configurable via MEM0_CHUNK_CHARS."""
+    return CHUNK_CHARS
 
 
 def _create_collection_rest(qdrant_base: str, collection_name: str, dims: int):
@@ -381,21 +248,22 @@ def init_memory() -> Any:
     if _memory is None:
         _init_status = "initializing"
         try:
-            embed_dims = CONFIG["vector_store"]["config"]["embedding_model_dims"]
-            qdrant_host = CONFIG["vector_store"]["config"]["host"]
-            qdrant_port = CONFIG["vector_store"]["config"]["port"]
+            embed_dims = EMBED_DIMS
+            qdrant_host = QDRANT_HOST
+            qdrant_port = QDRANT_PORT
             qdrant_base = f"http://{qdrant_host}:{qdrant_port}"
 
             # Check existing collections for dimension mismatches (extracted for testability)
             _check_and_fix_collection_dims(qdrant_base, embed_dims)
 
             from mem0 import Memory
-            print("[mcp_server] Initializing mem0 (creates Qdrant collections)...", flush=True)
-            print(f"[mcp_server] CONFIG: {json.dumps(CONFIG, default=str, indent=2)}", flush=True)
-            print(f"[mcp_server] MEM0_TELEMETRY env: {os.environ.get('MEM0_TELEMETRY', 'NOT SET')}", flush=True)
+            print("[mcp_server] Initializing mem0 (fastembed embedder, no extraction LLM)...", flush=True)
+            print(f"[mcp_server] EMBED_MODEL: {EMBED_MODEL} ({embed_dims}d), MEM0_TELEMETRY: {os.environ.get('MEM0_TELEMETRY', 'NOT SET')}", flush=True)
+            # "llm" key present-but-neutered: from_config would otherwise inject a
+            # default OpenAI LLM (needs an API key). The sentinel fails loudly if
+            # any code path ever tries to use it.
             _memory = Memory.from_config(CONFIG)
-            # Wrap the LLM to inject num_ctx into every Ollama call
-            _memory.llm = ContextAwareOllamaLLM(_memory.llm)
+            _memory.llm = NoExtractionLLM()
             print("[mcp_server] ✅ mem0 initialized", flush=True)
 
             # Verify the collection was actually created. mem0 doesn't always
@@ -451,19 +319,46 @@ def init_memory() -> Any:
 
     return _memory
 
+CONFIG = {
+    # No extraction LLM: fact inference is the calling agent's responsibility.
+    # The "llm" key must exist (from_config would otherwise inject a default
+    # OpenAI LLM that requires an API key) but is neutered via a provider that
+    # is immediately replaced by the NoExtractionLLM sentinel in init_memory().
+    "llm": {
+        "provider": "openai",
+        "config": {"model": "unused-no-extraction-llm", "api_key": "unused"},
+    },
+    "embedder": {
+        "provider": "fastembed",
+        "config": {
+            "model": EMBED_MODEL,
+            "embedding_dims": EMBED_DIMS,
+        },
+    },
+    "vector_store": {
+        "provider": "qdrant",
+        "config": {
+            "host": QDRANT_HOST,
+            "port": QDRANT_PORT,
+            "embedding_model_dims": EMBED_DIMS,
+        },
+    },
+}
+
 # ── Tool definitions ────────────────────────────────────────────────────────
 
 TOOL_DEFINITIONS = [
     {
-        "name": "add_memory",
-        "description": "Save text or conversation history to persistent memory with LLM fact extraction. "
-                       "Large content is automatically chunked based on the model's context window. "
-                       "Use this to remember facts, decisions, user preferences, "
-                       "code patterns, or anything worth recalling later.",
+        "name": "add_raw_memory",
+        "description": "Store ONE concise fact as a memory. YOU do the fact extraction - "
+                       "this server has no extraction LLM. Store each fact as its own call: "
+                       "a 10-30 word self-contained sentence, active voice, specific names/"
+                       "versions/numbers preserved, rationale included. Set user_id to the "
+                       "project/team name for scoping.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "content": {"type": "string", "description": "The text or conversation to remember."},
+                "content": {"type": "string", "description": "One concise self-contained fact (10-30 words)."},
                 "user_id": {"type": "string", "description": "User identifier", "default": DEFAULT_USER_ID},
                 "metadata": {"type": "object", "description": "Optional metadata to attach"},
             },
@@ -471,17 +366,15 @@ TOOL_DEFINITIONS = [
         },
     },
     {
-        "name": "add_raw_memory",
-        "description": "Store text directly as a memory WITHOUT LLM fact extraction. "
-                       "Use for: (1) bulk imports/backups, (2) agent-managed extraction — you extract "
-                       "facts yourself and store each as a concise 10-30 word sentence (one fact per call, "
-                       "include specific names/versions/ports, preserve rationale, use active voice). "
-                       "Set user_id to the project/team name for scoping.",
+        "name": "add_verbatim",
+        "description": "Store raw text VERBATIM (no fact extraction): bulk document imports, "
+                       "backups, or raw reference material. Long text is chunked automatically "
+                       "at paragraph boundaries. For curated agent memory prefer add_raw_memory "
+                       "with self-extracted facts.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "content": {"type": "string", "description": "The text to store as-is. "
-                    "For agent-managed extraction, store one concise fact per call."},
+                "content": {"type": "string", "description": "The text to store verbatim (chunked if long)."},
                 "user_id": {"type": "string", "description": "User identifier", "default": DEFAULT_USER_ID},
                 "metadata": {"type": "object", "description": "Optional metadata to attach"},
             },
@@ -651,31 +544,9 @@ class Mem0Error(Exception):
         super().__init__("\n".join(parts))
 
 
-class LLMExtractionError(Mem0Error):
-    """LLM failed to extract facts — the silent failure case."""
-    pass
-
-
 class QdrantError(Mem0Error):
     """Qdrant operation failed (dimension mismatch, connection, etc.)."""
     pass
-
-
-class OllamaError(Mem0Error):
-    """Ollama is unreachable or returned an error."""
-    pass
-
-
-def _check_ollama():
-    """Verify Ollama is reachable. Raises OllamaError if not."""
-    try:
-        urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=5)
-    except Exception as e:
-        raise OllamaError(
-            "Cannot reach Ollama. Memory operations require a running Ollama instance.",
-            detail=f"{OLLAMA_URL}/api/tags — {e}",
-            fix="Start Ollama: 'ollama serve' (or run ./setup.sh)",
-        )
 
 
 def _check_qdrant():
@@ -686,17 +557,8 @@ def _check_qdrant():
         raise QdrantError(
             "Cannot reach Qdrant. Memory storage requires a running Qdrant instance.",
             detail=f"{QDRANT_URL} — {e}",
-            fix="Start Qdrant: 'docker compose up -d qdrant'",
+            fix="Single container: the entrypoint starts Qdrant first. Check 'docker logs <container>'.",
         )
-
-
-def _ollama_reachable() -> bool:
-    """Check if Ollama is reachable (non-raising). For health endpoint."""
-    try:
-        urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=3)
-        return True
-    except Exception:
-        return False
 
 
 def _qdrant_reachable() -> bool:
@@ -717,109 +579,33 @@ def _build_health_response() -> dict:
     """Build the health response dict. Used by the /health HTTP endpoint
     and directly by tests. This is extracted so tests can check health
     without making HTTP requests."""
-    ollama_ok = _ollama_reachable()
     qdrant_ok = _qdrant_reachable()
     mem0_ok = _mem0_ready()
 
-    if _init_status == "ready" and ollama_ok and qdrant_ok and mem0_ok:
+    if _init_status == "ready" and qdrant_ok and mem0_ok:
         status = "ok"
     elif _init_status in ("starting", "initializing"):
         status = "starting"
     else:
         status = "degraded"
 
-    if ollama_ok:
-        model_status = _ping_llm_model()
-    else:
-        model_status = "unreachable"
-
     return {
         "status": status,
         "init_status": _init_status,
         "components": {
-            "ollama": ollama_ok,
             "qdrant": qdrant_ok,
             "mem0": mem0_ok,
+            "extraction_llm": False,  # by design: agent does its own fact inference
         },
-        "model_status": model_status,
         "server": "mem0-local",
         "tools": len(TOOL_DEFINITIONS),
         "config": {
-            "llm": CONFIG["llm"]["config"]["model"],
-            "embedder": CONFIG["embedder"]["config"]["model"],
+            "extraction_llm": None,
+            "embedder": EMBED_MODEL,
+            "embed_dims": EMBED_DIMS,
             "vector_store": "qdrant",
         },
     }
-
-
-def _ping_llm_model() -> str:
-    """Lightweight LLM ping to check if the configured model is loaded and responsive.
-
-    Sends a minimal request to Ollama /api/generate with a tiny prompt ("hi")
-    and 1 token max. Cached for 30 seconds to avoid pinging on every health check.
-
-    Returns:
-        "loaded"     — model responded successfully
-        "unloaded"   — model not found (needs ollama pull)
-        "unreachable"— Ollama is down or request timed out
-    """
-
-    with _llm_ping_lock:
-        now = time.monotonic()
-        cached_status = _llm_ping_cache.get("status")
-        cached_at = _llm_ping_cache.get("checked_at", 0.0)
-        if cached_status is not None and (now - cached_at) < _LLM_PING_CACHE_TTL:
-            return cached_status
-
-        model = CONFIG["llm"]["config"]["model"]
-        try:
-            req_body = json.dumps({
-                "model": model,
-                "prompt": "hi",
-                "stream": False,
-                "options": {"num_predict": 1},
-            }).encode()
-            req = urllib.request.Request(
-                f"{OLLAMA_URL}/api/generate",
-                data=req_body,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            urllib.request.urlopen(req, timeout=5)
-            status = "loaded"
-        except urllib.error.HTTPError as e:
-            # 404 = model not found
-            if e.code == 404:
-                status = "unloaded"
-            else:
-                # Other HTTP errors — treat as unreachable
-                status = "unreachable"
-        except Exception:
-            status = "unreachable"
-
-        _llm_ping_cache["status"] = status
-        _llm_ping_cache["checked_at"] = now
-        return status
-
-
-def _diagnose_llm_failure(m, model_name: str) -> str:
-    """Run a diagnostic LLM call to find out WHY extraction returned empty.
-    Returns a human-readable reason string."""
-    try:
-        test = m.llm.generate_response(
-            messages=[
-                {"role": "system", "content": "Output valid JSON only."},
-                {"role": "user", "content": 'Return: {"test": true}'},
-            ],
-            response_format={"type": "json_object"},
-        )
-        if not test or not test.strip():
-            return "LLM returned an empty response — the model may be overloaded, out of memory, or too small"
-        if "test" not in test and "true" not in test:
-            return f"LLM returned non-JSON output instead of structured data: {test[:300]}"
-        return "LLM responded correctly to a simple test, but failed on the actual extraction prompt (input may be too complex or too long for this model)"
-    except Exception as e:
-        return f"LLM diagnostic call failed: {e}"
 
 
 # ── Tool execution ──────────────────────────────────────────────────────────
@@ -828,131 +614,87 @@ def execute_tool(name: str, arguments: dict) -> dict:
     m = get_memory()
     uid = arguments.get("user_id", DEFAULT_USER_ID)
 
-    # ── add_memory ──────────────────────────────────────────────────────────
-    if name == "add_memory":
+    def _wrap_add_errors(e: Exception, tool: str) -> Mem0Error:
+        """Translate common add/search failures into actionable errors."""
+        err_str = str(e)
+        if "Vector dimension" in err_str or "dimension" in err_str.lower():
+            return QdrantError(
+                "Vector dimension mismatch in Qdrant.",
+                tool=tool, detail=err_str,
+                fix="The stored collection was built with a different embedder. "
+                    "Keep MEM0_EMBED_DIMS=768 (nomic v1.5) or wipe the collection deliberately.",
+            )
+        if "Collection" in err_str and ("doesn't exist" in err_str or "not found" in err_str.lower()):
+            return QdrantError(
+                "Qdrant collection does not exist.",
+                tool=tool, detail=err_str,
+                fix="Restart the container so init creates the collection: 'docker compose restart mcp-server'",
+            )
+        if "Connection" in err_str or "refused" in err_str:
+            return QdrantError(
+                "Connection to Qdrant failed.",
+                tool=tool, detail=err_str,
+                fix="Single container: entrypoint starts Qdrant before the server. Check 'docker logs <container>'.",
+            )
+        return Mem0Error("Memory operation failed.", tool=tool, detail=err_str)
+
+    # ── add_raw_memory (one concise fact, agent-extracted) ──────────────────
+    if name == "add_raw_memory":
         content = arguments["content"]
         if not content or not content.strip():
             raise Mem0Error("Cannot save empty content.", tool=name,
-                            fix="Provide text or a conversation to remember.")
-
-        infer = True  # add_memory always uses LLM extraction
+                            fix="Provide one concise self-contained fact.")
+        if len(content.strip()) > _get_chunk_size():
+            raise Mem0Error(
+                "Content exceeds the verbatim chunk size - this looks like raw text, not a concise fact.",
+                tool=name,
+                detail=f"{len(content)} chars (limit {_get_chunk_size()}).",
+                fix="Split it into separate concise facts and call add_raw_memory per fact, "
+                    "or use add_verbatim for raw document text.",
+            )
         metadata = arguments.get("metadata")
-        model_name = CONFIG["llm"]["config"]["model"]
-        MAX_CHUNK_CHARS = _get_chunk_size()
-        all_results = []
-        chunk_errors = []
+        try:
+            return m.add(content, user_id=uid, metadata=metadata, infer=False)
+        except Exception as e:
+            raise _wrap_add_errors(e, name)
 
-        # Detect conversation messages (JSON array of {role, content} dicts)
-        is_conversation, parsed_json = _detect_conversation(content)
-
-        def _do_add(text, user_id, meta, use_infer):
-            """Call m.add() with LLM response logging for diagnostics."""
-            try:
-                result = m.add(text, user_id=user_id, metadata=meta, infer=use_infer)
-
-                if use_infer:
-                    r = result.get("results", []) if isinstance(result, dict) else result
-                    if not r:
-                        # Build diagnostic from captured LLM response
-                        actual = m.llm.last_response if hasattr(m.llm, 'last_response') else None
-                        if actual is None:
-                            reason = "LLM was never called — mem0 may have skipped extraction (input too short or unrecognized format)"
-                        elif not actual or not actual.strip():
-                            reason = "LLM returned an empty response"
-                        elif "memory" not in actual:
-                            reason = f"LLM response did not contain 'memory' key. Response (first 500 chars): {actual[:500]}"
-                        else:
-                            reason = f"LLM returned JSON with 'memory' key but it was empty or unparseable. Response (first 500 chars): {actual[:500]}"
-                        chunk_errors.append(reason)
-
-                return result
-
-            except Exception as e:
-                err_str = str(e)
-                if "Vector dimension" in err_str:
-                    raise QdrantError(
-                        "Vector dimension mismatch in Qdrant.",
-                        tool=name, detail=err_str,
-                        fix="Delete stale collection and restart: "
-                            "'curl -X DELETE http://localhost:6333/collections/mem0 && "
-                            "docker compose restart mcp-server'",
-                    )
-                elif "Collection" in err_str and "doesn't exist" in err_str:
-                    raise QdrantError(
-                        "Qdrant collection does not exist.",
-                        tool=name, detail=err_str,
-                        fix="Restart the MCP server so it creates the collection: "
-                            "'docker compose restart mcp-server'",
-                    )
-                elif "Connection" in err_str or "refused" in err_str:
-                    raise OllamaError(
-                        "Connection to Ollama failed during memory extraction.",
-                        tool=name, detail=err_str,
-                        fix="Check Ollama is running: 'ollama serve'",
-                    )
-                chunk_errors.append(err_str)
-                return {"results": [], "error": err_str}
-
-        if is_conversation or len(content) <= MAX_CHUNK_CHARS:
-            # Single call — no chunking needed
-            # Pass the original string content for both cases. mem0's add()
-            # expects a string; for conversations, it detects the JSON format
-            # internally and processes the messages.
-            result = _do_add(content, uid, metadata, infer)
-            all_results.append(result)
-        else:
-            # Chunk large text at paragraph boundaries with context header
-            header_parts = []
-            if metadata and metadata.get("file"):
-                header_parts.append(f"[Document: {metadata['file']}]")
-            if metadata and metadata.get("source"):
-                header_parts.append(f"[Source: {metadata['source']}]")
-            context_header = " ".join(header_parts) if header_parts else ""
-            chunks = _chunk_text(content, MAX_CHUNK_CHARS, context_header=context_header)
-            for ci, chunk in enumerate(chunks):
-                chunk_meta = dict(metadata) if metadata else {}
-                chunk_meta["chunk"] = f"{ci+1}/{len(chunks)}"
-                result = _do_add(chunk, uid, chunk_meta, infer)
-                all_results.append(result)
-
-        # Merge results
-        merged = {"results": [], "chunks": len(all_results)}
-        for r in all_results:
-            if isinstance(r, dict) and "results" in r:
-                merged["results"].extend(r["results"])
-            elif isinstance(r, list):
-                merged["results"].extend(r)
-            elif r:
-                merged["results"].append(r)
-
-        # Check for silent failures (only when LLM extraction was expected)
-        if infer:
-            total = len(merged.get("results", []))
-            if total == 0:
-                reason = "; ".join(chunk_errors) if chunk_errors else "No facts were extracted from the input"
-                raise LLMExtractionError(
-                    f"Memory could not be saved. The LLM ({model_name}) did not extract any facts.",
-                    tool=name,
-                    detail=f"{reason}\n  Input: {len(content)} chars, {len(all_results)} chunk(s) "
-                           f"(chunk size: {MAX_CHUNK_CHARS} chars for {model_name})",
-                    fix=f"(1) Check model supports JSON output: 'ollama run {model_name} \"Respond with JSON: {{\\\"facts\\\": []}}\"'\n"
-                        f"    (2) Check Ollama context window: 'ollama show {model_name}' (look for num_ctx)\n"
-                        f"    (3) Use add_raw_memory instead to store without LLM extraction",
-                )
-        return merged
-
-    # ── add_raw_memory ──────────────────────────────────────────────────────
-    elif name == "add_raw_memory":
+    # ── add_verbatim (bulk/raw, auto-chunked, no LLM) ───────────────────────
+    elif name == "add_verbatim":
         content = arguments["content"]
         if not content or not content.strip():
             raise Mem0Error("Cannot save empty content.", tool=name,
                             fix="Provide text to store.")
-        metadata = arguments.get("metadata")
+        metadata = arguments.get("metadata") or {}
+        MAX_CHUNK_CHARS = _get_chunk_size()
+        all_results = []
+
         try:
-            result = m.add(content, user_id=uid, metadata=metadata, infer=False)
-            return result
+            if len(content) <= MAX_CHUNK_CHARS:
+                all_results.append(m.add(content, user_id=uid, metadata=metadata, infer=False))
+            else:
+                header_parts = []
+                if metadata.get("file"):
+                    header_parts.append(f"[Document: {metadata['file']}]")
+                if metadata.get("source"):
+                    header_parts.append(f"[Source: {metadata['source']}]")
+                context_header = " ".join(header_parts) if header_parts else ""
+                chunks = _chunk_text(content, MAX_CHUNK_CHARS, context_header=context_header)
+                for ci, chunk in enumerate(chunks):
+                    chunk_meta = dict(metadata) if metadata else {}
+                    chunk_meta["chunk"] = f"{ci+1}/{len(chunks)}"
+                    all_results.append(m.add(chunk, user_id=uid, metadata=chunk_meta, infer=False))
+
+            merged = {"results": [], "chunks": len(all_results)}
+            for r in all_results:
+                if isinstance(r, dict) and "results" in r:
+                    merged["results"].extend(r["results"])
+                elif isinstance(r, list):
+                    merged["results"].extend(r)
+                elif r:
+                    merged["results"].append(r)
+            return merged
         except Exception as e:
-            raise Mem0Error("Failed to store raw memory.", tool=name, detail=str(e))
+            raise _wrap_add_errors(e, name)
 
     # ── search_memories ─────────────────────────────────────────────────────
     elif name == "search_memories":
@@ -1676,7 +1418,7 @@ def _handle_mcp_request(request: dict) -> Optional[dict]:
                     "content": [{
                         "type": "text",
                         "text": f"Unexpected error in {tool_name}: {e}\n\n"
-                                f"This is a bug. Check server logs: docker compose logs mcp-server",
+                                f"This is a bug. Check server logs: docker compose logs mem0-local",
                     }],
                     "isError": True,
                 },
@@ -1705,8 +1447,8 @@ async def main():
 
     server = await asyncio.start_server(http_handler, MCP_HOST, MCP_PORT)
     print(f"mem0-local MCP server listening on {MCP_HOST}:{MCP_PORT}", flush=True)
-    print(f"  LLM:      {CONFIG['llm']['config']['model']} @ {OLLAMA_URL} (ctx: {_LLM_NUM_CTX}, max_tokens: {_LLM_MAX_TOKENS})", flush=True)
-    print(f"  Embedder: {CONFIG['embedder']['config']['model']} @ {OLLAMA_URL}", flush=True)
+    print(f"  Extraction LLM: none (agent does its own fact inference)", flush=True)
+    print(f"  Embedder: {EMBED_MODEL} ({EMBED_DIMS}d, fastembed/ONNX)", flush=True)
     print(f"  Vector:   Qdrant @ {QDRANT_URL}", flush=True)
     print(f"  Tools:    {len(TOOL_DEFINITIONS)}", flush=True)
     print(f"  Health:   GET  http://{MCP_HOST}:{MCP_PORT}/health", flush=True)

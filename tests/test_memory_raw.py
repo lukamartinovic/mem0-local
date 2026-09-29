@@ -1,15 +1,15 @@
 """
 Tests for the memory pipeline using infer=False (no LLM extraction).
 
-These tests exercise the full CRUD pipeline — add → search → get → update →
-delete — without calling the LLM for fact extraction. They DO need Qdrant +
-the embedder (Ollama with nomic-embed-text), but NOT the LLM model (qwen2.5:7b).
+These tests exercise the full CRUD pipeline - add, search, get, update,
+delete - with NO LLM anywhere (this server has no extraction LLM). They need
+Qdrant + the local fastembed embedder only.
 
 Run inside container:
-    docker compose run --rm mcp-server pytest tests/test_memory_raw.py -v
+    docker compose run --rm mem0-local pytest tests/test_memory_raw.py -v
 
-Skip conditions: tests are skipped automatically if Qdrant or Ollama is not
-reachable, so they can run in mixed environments without failing.
+Skip conditions: tests are skipped automatically if Qdrant is not reachable,
+so they can run in mixed environments without failing.
 """
 
 import json
@@ -24,10 +24,9 @@ import mcp_server
 
 # ── Config ──────────────────────────────────────────────────────────────────
 
-QDRANT_HOST = os.environ.get("MEM0_QDRANT_HOST", "qdrant")
+QDRANT_HOST = os.environ.get("MEM0_QDRANT_HOST", "127.0.0.1")
 QDRANT_PORT = os.environ.get("MEM0_QDRANT_PORT", "6333")
 QDRANT_URL = f"http://{QDRANT_HOST}:{QDRANT_PORT}"
-OLLAMA_URL = os.environ.get("MEM0_OLLAMA_URL", "http://ollama:11434")
 
 
 # ── Skip conditions ──────────────────────────────────────────────────────────
@@ -44,11 +43,6 @@ needs_qdrant = pytest.mark.skipif(
     not _is_reachable(QDRANT_URL),
     reason=f"Qdrant not reachable at {QDRANT_URL}",
 )
-needs_ollama = pytest.mark.skipif(
-    not _is_reachable(f"{OLLAMA_URL}/api/tags"),
-    reason=f"Ollama not reachable at {OLLAMA_URL}",
-)
-
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -72,7 +66,6 @@ def test_user():
 # ── Tests ────────────────────────────────────────────────────────────────────
 
 @needs_qdrant
-@needs_ollama
 class TestMemoryRaw:
     """Memory pipeline tests using infer=False — no LLM, just Qdrant + embedder.
 

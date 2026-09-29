@@ -2,11 +2,10 @@
 Tests for new MCP tools: export_memories, import_memories, prune_memories,
 and search_memories with relevance scores.
 
-Needs Qdrant + embedder (infer=False tests). Tests that need the LLM
-are marked with @needs_ollama_llm and skipped if the model isn't available.
+Needs Qdrant + embedder only - no LLM exists in this server.
 
 Run inside container:
-    docker compose run --rm mcp-server pytest tests/test_new_features.py -v
+    docker compose run --rm mem0-local pytest tests/test_new_features.py -v
 """
 
 import json
@@ -21,10 +20,9 @@ import mcp_server
 
 # ── Config ──────────────────────────────────────────────────────────────────
 
-QDRANT_HOST = os.environ.get("MEM0_QDRANT_HOST", "qdrant")
+QDRANT_HOST = os.environ.get("MEM0_QDRANT_HOST", "127.0.0.1")
 QDRANT_PORT = os.environ.get("MEM0_QDRANT_PORT", "6333")
 QDRANT_URL = f"http://{QDRANT_HOST}:{QDRANT_PORT}"
-OLLAMA_URL = os.environ.get("MEM0_OLLAMA_URL", "http://ollama:11434")
 MCP_PORT = os.environ.get("MCP_PORT", "8765")
 MCP_URL = f"http://localhost:{MCP_PORT}"
 
@@ -41,11 +39,6 @@ needs_qdrant = pytest.mark.skipif(
     not _is_reachable(QDRANT_URL),
     reason=f"Qdrant not reachable at {QDRANT_URL}",
 )
-needs_ollama = pytest.mark.skipif(
-    not _is_reachable(f"{OLLAMA_URL}/api/tags"),
-    reason=f"Ollama not reachable at {OLLAMA_URL}",
-)
-
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -76,7 +69,6 @@ def _add_raw(content, user_id, metadata=None):
 # ── Health endpoint tests ────────────────────────────────────────────────────
 
 @needs_qdrant
-@needs_ollama
 class TestHealthEndpoint:
     """Tests for the improved /health endpoint with component status."""
 
@@ -92,15 +84,15 @@ class TestHealthEndpoint:
         """Health endpoint reports component reachability."""
         health = mcp_server._build_health_response()
         assert "components" in health
-        assert "ollama" in health["components"]
         assert "qdrant" in health["components"]
         assert "mem0" in health["components"]
+        assert health["components"]["extraction_llm"] is False
 
-    def test_health_has_model_status(self, memory):
-        """Health endpoint reports LLM model status."""
+    def test_health_has_no_model_status(self, memory):
+        """Health endpoint has no LLM model status (no extraction LLM exists)."""
         health = mcp_server._build_health_response()
-        assert "model_status" in health
-        assert health["model_status"] in ("loaded", "unloaded", "unreachable", "unknown")
+        assert "model_status" not in health
+        assert health["config"]["extraction_llm"] is None
 
     def test_health_has_tool_count(self, memory):
         """Health endpoint reports correct tool count."""
@@ -116,7 +108,6 @@ class TestHealthEndpoint:
 # ── Export / Import tests ────────────────────────────────────────────────────
 
 @needs_qdrant
-@needs_ollama
 class TestExportImport:
     """Tests for export_memories and import_memories tools."""
 
@@ -220,7 +211,6 @@ class TestExportImport:
 # ── Prune tests ──────────────────────────────────────────────────────────────
 
 @needs_qdrant
-@needs_ollama
 class TestPruneMemories:
     """Tests for prune_memories tool."""
 
@@ -290,7 +280,6 @@ class TestPruneMemories:
 # ── Search with scores tests ─────────────────────────────────────────────────
 
 @needs_qdrant
-@needs_ollama
 class TestSearchWithScores:
     """Tests for search_memories with relevance scores."""
 

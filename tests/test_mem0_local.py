@@ -46,8 +46,7 @@ if not _is_server_running():
     time.sleep(2)
 
 MCP_URL = f"http://localhost:{MCP_PORT}"
-OLLAMA_URL = os.environ.get("MEM0_OLLAMA_URL", "http://ollama:11434")
-QDRANT_URL = f"http://{os.environ.get('MEM0_QDRANT_HOST', 'qdrant')}:{os.environ.get('MEM0_QDRANT_PORT', '6333')}"
+QDRANT_URL = f"http://{os.environ.get('MEM0_QDRANT_HOST', '127.0.0.1')}:{os.environ.get('MEM0_QDRANT_PORT', '6333')}"
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -93,15 +92,27 @@ def test_user():
 # ── Infrastructure tests ────────────────────────────────────────────────────
 
 class TestInfrastructure:
-    def test_ollama_reachable(self):
-        resp = urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=10)
+    def test_qdrant_reachable(self):
+        resp = urllib.request.urlopen(f"{QDRANT_URL}/", timeout=5)
+        assert resp.status == 200
+
+    def test_mcp_server_health(self):
+        resp = urllib.request.urlopen(f"{MCP_URL}/health", timeout=5)
         assert resp.status == 200
         data = json.loads(resp.read())
-        models = [m["name"] for m in data.get("models", [])]
-        print(f"  Ollama models: {models}")
-        assert len(models) > 0, "No models installed in Ollama"
+        assert data["status"] == "ok"
+        assert data["tools"] == 12
+        assert data["components"]["extraction_llm"] is False
+        assert data["config"]["extraction_llm"] is None
+        print(f"  Server config: {data['config']}")
 
-    def test_qdrant_reachable(self):
+    def _unused_qdrant_reachable_removed(self):
+        pass
+
+    def test_health_config_has_no_llm(self):
+        resp = urllib.request.urlopen(f"{MCP_URL}/health", timeout=5)
+        data = json.loads(resp.read())
+        assert "llm" not in data["config"]
         resp = urllib.request.urlopen(f"{QDRANT_URL}/", timeout=5)
         assert resp.status == 200
 
@@ -141,9 +152,11 @@ class TestMCPProtocol:
 # ── Memory operation tests ─────────────────────────────────────────────────
 
 class TestMemoryOperations:
-    """Memory operation tests. All use add_raw_memory (no LLM extraction) because
-    these tests verify the CRUD pipeline — add, search, get, delete, entities.
-    LLM extraction is tested in real usage via add_memory (infer=True always)."""
+    """Memory operation tests.
+
+    This server has NO extraction LLM - all storage is agent-inferred
+    (add_raw_memory) or verbatim (add_verbatim). These tests verify the
+    CRUD pipeline - add, search, get, update, delete, entities."""
 
     def test_add_and_search(self, test_user):
         mcp_tool("add_raw_memory", {

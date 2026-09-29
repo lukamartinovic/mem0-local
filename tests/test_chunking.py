@@ -1,5 +1,5 @@
 """
-Unit tests for _chunk_text(), _get_chunk_size(), and _detect_conversation().
+Unit tests for _chunk_text() and _get_chunk_size().
 
 Pure Python — no Docker, no Ollama, no Qdrant needed.
 Can run locally on any machine:
@@ -114,112 +114,22 @@ class TestChunkText:
 # ── _get_chunk_size ──────────────────────────────────────────────────────────
 
 class TestGetChunkSize:
-    def test_default_context_length(self):
-        """Default context length (32768) produces 16000 char chunks."""
-        original = mcp_server._LLM_NUM_CTX
+    def test_default_chunk_size(self):
+        """Default chunk size is MEM0_CHUNK_CHARS (3000)."""
+        original = mcp_server.CHUNK_CHARS
         try:
-            mcp_server._LLM_NUM_CTX = 32768
-            assert mcp_server._get_chunk_size() == 16000
+            mcp_server.CHUNK_CHARS = 3000
+            assert mcp_server._get_chunk_size() == 3000
         finally:
-            mcp_server._LLM_NUM_CTX = original
+            mcp_server.CHUNK_CHARS = original
 
-    def test_known_models(self):
-        """All known models return correct chunk sizes."""
-        assert mcp_server._CHUNK_SIZES["qwen2.5:3b"] == 1500
-        assert mcp_server._CHUNK_SIZES["qwen2.5:7b"] == 3000
-        assert mcp_server._CHUNK_SIZES["qwen3.5:9b"] == 4000
-        assert mcp_server._CHUNK_SIZES["gemma4:12b"] == 5000
-        assert mcp_server._CHUNK_SIZES["qwen3.5:27b"] == 8000
-
-    def test_chunk_size_from_context_length(self):
-        """Chunk size is computed from MEM0_LLM_CONTEXT_LENGTH."""
-        original = mcp_server._LLM_NUM_CTX
+    def test_chunk_size_from_env(self):
+        """Chunk size follows MEM0_CHUNK_CHARS."""
+        original = mcp_server.CHUNK_CHARS
         try:
-            # 32768 ctx → (32768 - 6000) * 4 = 106872, clamped to 16000
-            mcp_server._LLM_NUM_CTX = 32768
-            assert mcp_server._get_chunk_size() == 16000
-
-            # 8192 ctx → (8192 - 6000) * 4 = 8768
-            mcp_server._LLM_NUM_CTX = 8192
-            assert mcp_server._get_chunk_size() == 8768
-
-            # Very small ctx → chunk_tokens clamped to 1000, * 4 = 4000
-            mcp_server._LLM_NUM_CTX = 2048
-            assert mcp_server._get_chunk_size() == 4000
+            mcp_server.CHUNK_CHARS = 1200
+            assert mcp_server._get_chunk_size() == 1200
         finally:
-            mcp_server._LLM_NUM_CTX = original
+            mcp_server.CHUNK_CHARS = original
 
 
-# ── _detect_conversation ─────────────────────────────────────────────────────
-
-class TestDetectConversation:
-    def test_valid_conversation_json(self):
-        """JSON array of {role, content} dicts is detected as conversation."""
-        content = json.dumps([
-            {"role": "user", "content": "Hello"},
-            {"role": "assistant", "content": "Hi there"},
-        ])
-        is_conv, messages = mcp_server._detect_conversation(content)
-        assert is_conv is True
-        assert messages is not None
-        assert len(messages) == 2
-        assert messages[0]["role"] == "user"
-
-    def test_plain_text_not_conversation(self):
-        """Plain text is not detected as conversation."""
-        is_conv, messages = mcp_server._detect_conversation(
-            "I prefer TypeScript over JavaScript."
-        )
-        assert is_conv is False
-        assert messages is None
-
-    def test_invalid_json_not_conversation(self):
-        """Invalid JSON is not detected as conversation."""
-        is_conv, messages = mcp_server._detect_conversation("{not valid json}")
-        assert is_conv is False
-        assert messages is None
-
-    def test_json_object_not_conversation(self):
-        """JSON object (not array) is not a conversation."""
-        is_conv, messages = mcp_server._detect_conversation('{"key": "value"}')
-        assert is_conv is False
-        assert messages is None
-
-    def test_json_array_without_role_not_conversation(self):
-        """JSON array without 'role' key is not a conversation."""
-        is_conv, messages = mcp_server._detect_conversation(
-            json.dumps([{"text": "hello"}, {"text": "world"}])
-        )
-        assert is_conv is False
-        assert messages is None
-
-    def test_empty_array_not_conversation(self):
-        """Empty JSON array is not a conversation (would cause empty add)."""
-        is_conv, messages = mcp_server._detect_conversation("[]")
-        assert is_conv is False
-        assert messages is None
-
-    def test_empty_string_not_conversation(self):
-        """Empty string is not a conversation."""
-        is_conv, messages = mcp_server._detect_conversation("")
-        assert is_conv is False
-        assert messages is None
-
-    def test_single_message_conversation(self):
-        """Single message in a JSON array is still a conversation."""
-        content = json.dumps([{"role": "user", "content": "Hello"}])
-        is_conv, messages = mcp_server._detect_conversation(content)
-        assert is_conv is True
-        assert len(messages) == 1
-
-    def test_message_without_content_still_conversation(self):
-        """Message with role but no content is still detected as conversation."""
-        content = json.dumps([{"role": "user"}])
-        is_conv, messages = mcp_server._detect_conversation(content)
-        assert is_conv is True  # Has role key — that's the check
-
-    def test_non_string_input_not_conversation(self):
-        """None or non-string input is handled gracefully."""
-        is_conv, messages = mcp_server._detect_conversation(None)
-        assert is_conv is False
-        assert messages is None

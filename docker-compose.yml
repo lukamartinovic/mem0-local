@@ -1,51 +1,28 @@
 services:
-  # ── Qdrant: vector database ──────────────────────────────────────────────
-  qdrant:
-    image: qdrant/qdrant:v1.13.2
-    container_name: mem0-qdrant
-    ports:
-      - "6333:6333"
-    volumes:
-      - qdrant_data:/qdrant/storage
-    healthcheck:
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/6333' 2>/dev/null"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 5s
-
-  # ── MCP server ────────────────────────────────────────────────────────────
-  # Ollama runs on the host (Metal GPU). MCP server reaches it via host.docker.internal
-  mcp-server:
+  # ── Single container: Qdrant (supervisor-started) + MCP server ────────────
+  # No Ollama anywhere: fact inference is the calling agent's job.
+  mem0-local:
     build: .
-    container_name: mem0-mcp-server
+    container_name: mem0-local
     ports:
-      - "8765:8765"
+      - "8765:8765"   # MCP server + web UI
+      - "6333:6333"   # Qdrant (same container)
     environment:
       MEM0_TELEMETRY: "False"
-      # Ollama URL — set MEM0_OLLAMA_URL in .env to use an external provider
-      # (e.g., Ollama on company VPN). Default: host.docker.internal (local).
-      MEM0_OLLAMA_URL: ${MEM0_OLLAMA_URL:-http://host.docker.internal:11434}
-      MEM0_QDRANT_HOST: qdrant
+      MEM0_QDRANT_HOST: 127.0.0.1
       MEM0_QDRANT_PORT: "6333"
-      MEM0_LLM_MODEL: ${MEM0_LLM_MODEL:-qwen2.5:7b}
-      MEM0_EMBED_MODEL: ${MEM0_EMBED_MODEL:-nomic-embed-text}
+      MEM0_EMBED_MODEL: ${MEM0_EMBED_MODEL:-nomic-ai/nomic-embed-text-v1.5}
       MEM0_EMBED_DIMS: "${MEM0_EMBED_DIMS:-768}"
-      MEM0_LLM_TEMPERATURE: "0.1"
-      MEM0_LLM_MAX_TOKENS: "4000"
-      MEM0_LLM_CONTEXT_LENGTH: "32768"
+      MEM0_CHUNK_CHARS: "${MEM0_CHUNK_CHARS:-3000}"
       MEM0_DEFAULT_USER_ID: ${MEM0_DEFAULT_USER_ID:-dev}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    depends_on:
-      qdrant:
-        condition: service_healthy
+    volumes:
+      - qdrant_data:/qdrant/storage
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request,json; d=json.loads(urllib.request.urlopen('http://localhost:8765/health',timeout=10).read()); exit(0 if d.get('status')=='ok' else 1)"]
       interval: 15s
       timeout: 10s
       retries: 5
-      start_period: 600s
+      start_period: 180s
 
 volumes:
   qdrant_data:
