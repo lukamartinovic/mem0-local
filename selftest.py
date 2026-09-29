@@ -234,7 +234,7 @@ def run():
 def _print_summary():
     print()
     if failed > 0:
-        print(f"{RED}  {passed}/12 tools passed, {failed} failed{NC}")
+        print(f"{RED}  {passed}/13 tools passed, {failed} failed{NC}")
         print()
         print("Errors:")
         for label, err in errors:
@@ -246,7 +246,7 @@ def _print_summary():
         print("  * Qdrant down:      docker compose logs mem0-local")
         print("  * Dimension error:  MEM0_EMBED_DIMS must match the stored collection (768)")
     else:
-        print(f"{GREEN}  12/12 tools passed - all MCP commands verified{NC}")
+        print(f"{GREEN}  12/13 tools passed - all MCP commands verified{NC}")
     print()
 
 

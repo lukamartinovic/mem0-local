@@ -55,7 +55,7 @@ Your IDE agent (does its own FACT INFERENCE)
   :  add_raw_memory("one concise fact")      add_verbatim("bulk text")
   ↓ HTTP (MCP JSON-RPC)
 mem0-local container (:8765)
-  ├─ MCP server (12 tools, health endpoint, web UI at /)
+  ├─ MCP server (13 tools, health endpoint, web UI at /)
   ├─ fastembed (ONNX, CPU) -> nomic-ai/nomic-embed-text-v1.5, 768 dims
   └─ Qdrant v1.13.2 (same container, :6333)
 ```
@@ -295,7 +295,7 @@ mem0-local/
 ├── docker-compose.yml   # ONE service: mem0-local (Qdrant + server)
 ├── Dockerfile           # multistage: pinned Qdrant binary + python:3.12-slim
 ├── entrypoint.sh        # Qdrant background -> self-test -> server
-├── mcp_server.py        # MCP server - 12 tools, NO LLM, NoExtractionLLM sentinel
+├── mcp_server.py        # MCP server - 13 tools, NO LLM, NoExtractionLLM sentinel
 ├── selftest.py          # 12/12 tool verification (runs in entrypoint)
 ├── import_docs.py       # Import markdown docs verbatim
 ├── requirements.txt     # mem0ai[nlp], qdrant-client, fastembed

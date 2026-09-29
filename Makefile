@@ -18,6 +18,16 @@ health:   ## Check server health
 shell:    ## Shell into the container
 	docker compose exec mem0-local bash
 
+test:     ## Fast LOCAL tests: pure-Python, no Docker/services (seconds)
+	python3 -m pytest tests/test_chunking.py tests/test_no_llm.py -v
+
+test-in-container: ## Full suite inside the container (make up first)
+	docker compose run --rm mem0-local pytest tests/ -v
+
+test-all: ## Unit locally + full suite in container
+	python3 -m pytest tests/test_chunking.py tests/test_no_llm.py -q \
+	  && docker compose run --rm mem0-local pytest tests/ -q
+
 export:   ## Export memories to JSON (usage: make export USER=dev)
 	@USER_ID=$$(echo "$(USER)" | sed 's/^$$/dev/'); \
 	curl -s -X POST http://localhost:8765/mcp \

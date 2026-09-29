@@ -10,19 +10,21 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Qdrant binary + its config dir + dashboard assets from the pinned image
-# (binary alone is not enough: it expects ./config/default.yaml next to CWD)
+# libunwind8 FIRST (before any qdrant run): the qdrant binary needs
+# libunwind-ptrace/-aarch64, absent from the python-slim base. This was the
+# build-time 'qdrant --version' failure: the check ran in a base without it.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl libunwind8 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Qdrant binary + config + dashboard assets lifted from the pinned image.
 COPY --from=qdrant /qdrant/ /qdrant/
 RUN cp /qdrant/qdrant /usr/local/bin/qdrant && chmod +x /usr/local/bin/qdrant \
     && mkdir -p /qdrant/storage /qdrant/config \
-    && qdrant --version \
-    || (echo "BUILD FAIL: qdrant binary not runnable - see ldd below"; ldd /qdrant/qdrant; exit 1)
+    && qdrant --version || { echo "BUILD FAIL: qdrant binary not runnable - ldd:"; ldd /qdrant/qdrant; exit 1; }
 
-# Install dependencies first (layer caching)
-# libunwind8: the qdrant binary links it (libunwind-ptrace/-aarch64), and the
-# python:3.12-slim base lacks it (surfaced by ldd in the build-time check below)
+# Install python dependencies first (layer caching)
 COPY requirements.txt .
-RUN apt-get update && apt-get install -y --no-install-recommends curl libunwind8 && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the MCP server

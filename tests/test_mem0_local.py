@@ -101,7 +101,7 @@ class TestInfrastructure:
         assert resp.status == 200
         data = json.loads(resp.read())
         assert data["status"] == "ok"
-        assert data["tools"] == 12
+        assert data["tools"] == 13
         assert data["components"]["extraction_llm"] is False
         assert data["config"]["extraction_llm"] is None
         print(f"  Server config: {data['config']}")
@@ -121,7 +121,7 @@ class TestInfrastructure:
         assert resp.status == 200
         data = json.loads(resp.read())
         assert data["status"] == "ok"
-        assert data["tools"] == 12
+        assert data["tools"] == 13
         print(f"  Server config: {data['config']}")
 
 
