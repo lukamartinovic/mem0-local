@@ -10,9 +10,13 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Qdrant binary + its static assets from the pinned image
-COPY --from=qdrant /qdrant/qdrant /usr/local/bin/qdrant
-RUN mkdir -p /qdrant/storage /qdrant/config
+# Qdrant binary + its config dir + dashboard assets from the pinned image
+# (binary alone is not enough: it expects ./config/default.yaml next to CWD)
+COPY --from=qdrant /qdrant/ /qdrant/
+RUN cp /qdrant/qdrant /usr/local/bin/qdrant && chmod +x /usr/local/bin/qdrant \
+    && mkdir -p /qdrant/storage /qdrant/config \
+    && qdrant --version \
+    || (echo "BUILD FAIL: qdrant binary not runnable - see ldd below"; ldd /qdrant/qdrant; exit 1)
 
 # Install dependencies first (layer caching)
 COPY requirements.txt .
