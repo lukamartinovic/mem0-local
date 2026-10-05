@@ -23,8 +23,6 @@ import pytest
 
 MCP_PORT = os.environ.get("MCP_PORT", "8765")
 
-# When running via `docker compose run mcp-server pytest`, there's no
-# already-running MCP server to hit. Detect this and start one inline.
 def _is_server_running():
     try:
         urllib.request.urlopen(f"http://localhost:{MCP_PORT}/health", timeout=2)
@@ -32,8 +30,23 @@ def _is_server_running():
     except Exception:
         return False
 
-# Start inline server if needed
-if not _is_server_running():
+def _is_qdrant_reachable():
+    try:
+        urllib.request.urlopen(
+            f"http://{os.environ.get('MEM0_QDRANT_HOST', '127.0.0.1')}:{os.environ.get('MEM0_QDRANT_PORT', '6333')}/",
+            timeout=2,
+        )
+        return True
+    except Exception:
+        return False
+
+needs_stack = pytest.mark.skipif(
+    not _is_qdrant_reachable(),
+    reason="no Qdrant reachable - this HTTP suite needs a live stack (container or local qdrant)",
+)
+
+# Start inline server if a live Qdrant exists but no MCP server (docker compose run case)
+if not _is_server_running() and _is_qdrant_reachable():
     sys.path.insert(0, "/app")
     import mcp_server
     mcp_server.init_memory()
@@ -43,7 +56,10 @@ if not _is_server_running():
 
     _server_thread = threading.Thread(target=_run_server, daemon=True)
     _server_thread.start()
-    time.sleep(2)
+    for _ in range(30):  # poll, don't sleep-guess
+        if _is_server_running():
+            break
+        time.sleep(1)
 
 MCP_URL = f"http://localhost:{MCP_PORT}"
 QDRANT_URL = f"http://{os.environ.get('MEM0_QDRANT_HOST', '127.0.0.1')}:{os.environ.get('MEM0_QDRANT_PORT', '6333')}"
@@ -91,6 +107,7 @@ def test_user():
 
 # ── Infrastructure tests ────────────────────────────────────────────────────
 
+@needs_stack
 class TestInfrastructure:
     def test_qdrant_reachable(self):
         resp = urllib.request.urlopen(f"{QDRANT_URL}/", timeout=5)
@@ -106,9 +123,6 @@ class TestInfrastructure:
         assert data["config"]["extraction_llm"] is None
         print(f"  Server config: {data['config']}")
 
-    def _unused_qdrant_reachable_removed(self):
-        pass
-
     def test_health_config_has_no_llm(self):
         resp = urllib.request.urlopen(f"{MCP_URL}/health", timeout=5)
         data = json.loads(resp.read())
@@ -116,17 +130,10 @@ class TestInfrastructure:
         resp = urllib.request.urlopen(f"{QDRANT_URL}/", timeout=5)
         assert resp.status == 200
 
-    def test_mcp_server_health(self):
-        resp = urllib.request.urlopen(f"{MCP_URL}/health", timeout=5)
-        assert resp.status == 200
-        data = json.loads(resp.read())
-        assert data["status"] == "ok"
-        assert data["tools"] == 13
-        print(f"  Server config: {data['config']}")
-
 
 # ── MCP protocol tests ──────────────────────────────────────────────────────
 
+@needs_stack
 class TestMCPProtocol:
     def test_initialize(self):
         resp = mcp_call("initialize", {
@@ -142,15 +149,17 @@ class TestMCPProtocol:
         tools = resp["result"]["tools"]
         assert len(tools) == 13
         names = {t["name"] for t in tools}
-        expected = {"add_memory", "add_raw_memory", "search_memories", "get_memories",
+        expected = {"add_raw_memory", "add_verbatim", "search_memories", "get_memories",
                     "get_memory", "update_memory", "delete_memory",
                     "delete_all_memories", "list_entities", "delete_entities",
                     "export_memories", "import_memories", "prune_memories"}
-        assert names == expected, f"Missing tools: {expected - names}"
+        assert names == expected, f"Missing tools: {expected - names} | extra: {names - expected}"
+        assert "add_memory" not in names, "the LLM-extraction tool must NOT exist"
 
 
 # ── Memory operation tests ─────────────────────────────────────────────────
 
+@needs_stack
 class TestMemoryOperations:
     """Memory operation tests.
 

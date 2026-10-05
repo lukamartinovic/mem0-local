@@ -640,7 +640,10 @@ def execute_tool(name: str, arguments: dict) -> dict:
 
     # ── add_raw_memory (one concise fact, agent-extracted) ──────────────────
     if name == "add_raw_memory":
-        content = arguments["content"]
+        content = arguments.get("content")
+        if content is None:
+            raise Mem0Error("content is required.", tool=name,
+                            fix="Pass the fact as {'content': '...'}")
         if not content or not content.strip():
             raise Mem0Error("Cannot save empty content.", tool=name,
                             fix="Provide one concise self-contained fact.")
@@ -660,7 +663,10 @@ def execute_tool(name: str, arguments: dict) -> dict:
 
     # ── add_verbatim (bulk/raw, auto-chunked, no LLM) ───────────────────────
     elif name == "add_verbatim":
-        content = arguments["content"]
+        content = arguments.get("content")
+        if content is None:
+            raise Mem0Error("content is required.", tool=name,
+                            fix="Pass the text as {'content': '...'}")
         if not content or not content.strip():
             raise Mem0Error("Cannot save empty content.", tool=name,
                             fix="Provide text to store.")
@@ -844,7 +850,9 @@ def execute_tool(name: str, arguments: dict) -> dict:
                 for mem in results:
                     for key in ("user_id", "agent_id", "app_id", "run_id"):
                         if key in (mem or {}):
-                            entities.add(mem[key])
+                            val = mem.get(key, None)
+                            if val:  # skip present-but-None: avoids TypeError in sorted()
+                                entities.add(val)
             except Exception:
                 pass
         return {"entities": sorted(entities)}
@@ -994,22 +1002,35 @@ def execute_tool(name: str, arguments: dict) -> dict:
             created_at = mem.get("created_at", "")
             mem_age = None
             if created_at:
-                # Try ISO 8601 parsing
+                # Try ISO 8601 parsing. Handles: full ISO-T timestamps, date-only
+                # strings (Qdrant can return datetime.date style), trailing Z,
+                # and plain unix-epoch floats.
                 try:
                     import datetime as _dt
-                    if "T" in str(created_at):
-                        mem_age = _dt.datetime.fromisoformat(str(created_at).replace("Z", "+00:00")).timestamp()
+                    _s = str(created_at).strip()
+                    if _s.replace(".", "", 1).isdigit():
+                        mem_age = float(_s)
                     else:
-                        # Try as a unix timestamp or date string
-                        mem_age = float(created_at)
+                        if not "T" in _s:
+                            _s = _s + "T00:00:00"
+                        if _s.endswith("Z"):
+                            _s = _s[:-1] + "+00:00"
+                        _d = _dt.datetime.fromisoformat(_s)
+                        if _d.tzinfo is None:
+                            _d = _d.replace(tzinfo=_dt.timezone.utc)
+                        mem_age = _d.timestamp()
                 except (ValueError, TypeError):
                     pass
 
             if mem_age is not None and mem_age < cutoff:
-                # Apply optional min_score filter
+                # Apply optional min_score filter.
+                # Semantics: min_score sets the relevance FLOOR for deletion.
+                # Memories WITH a score >= min_score are kept (high-value).
+                # Memories with NO score are kept too (unrated - never auto-delete
+                # on a relevance filter the caller cannot inspect).
                 if min_score is not None:
                     score = mem.get("score")
-                    if score is not None and score > min_score:
+                    if score is None or score >= min_score:
                         continue
 
                 to_prune.append({

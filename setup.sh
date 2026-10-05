@@ -84,6 +84,8 @@ info "Embeddings: fastembed (ONNX, in-container, 768 dims)"
 # First-run guidance: the model downloads on first embed call, not at build.
 if [ ! -f .downloaded ]; then
   warn "First container start will download the embedding model (~160 MB, one time)."
+else
+  info "Embedding model cached - starting fast"
 fi
 
 docker compose up -d

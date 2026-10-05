@@ -26,8 +26,16 @@ fi
 rm -f "$STORAGE/.write_test" 2>/dev/null || true
 
 # ── 2. Start Qdrant in the background (output captured for diagnosis) ───────
+# NOTE: the qdrant binary has NO --path CLI flag (verified in v1.13.2 main.rs:
+# only bootstrap/uri/snapshot/storage_snapshot/config_path/disable_telemetry/
+# stacktrace/reinit). Storage location is configured via the env var
+# QDRANT__STORAGE__STORAGE_PATH (Qdrant merges env QDRANT__SECTION__KEY into
+# its config, settings.rs). Using --path makes qdrant abort at arg-parse.
+if [ "$STORAGE" != "/qdrant/storage" ]; then
+    export QDRANT__STORAGE__STORAGE_PATH="$STORAGE"
+fi
 echo "[entrypoint] Starting qdrant (storage: $STORAGE)..."
-qdrant --path "$STORAGE" > "$QDRANT_LOG" 2>&1 &
+qdrant > "$QDRANT_LOG" 2>&1 &
 QDRANT_PID=$!
 
 # ── 3. Wait for readiness; on death print its actual log ────────────────────
@@ -97,6 +105,7 @@ done
 echo "[entrypoint] Running self-test..."
 if python3 selftest.py; then
     echo "[entrypoint] Self-test passed"
+    touch /app/.downloaded 2>/dev/null || true  # model cache warm - setup.sh next-start hint
 else
     echo "[entrypoint] WARNING: self-test had failures (see above). Server will still start."
     echo "[entrypoint]   Failing tools will return errors to your IDE agent."
