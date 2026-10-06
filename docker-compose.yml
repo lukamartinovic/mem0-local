@@ -4,6 +4,9 @@ services:
   mem0-local:
     build: .
     container_name: mem0-local
+    # Fire-and-forget: after a host reboot / Docker restart / crash the stack
+    # comes back on its own, with no human intervention.
+    restart: unless-stopped
     ports:
       - "8765:8765"   # MCP server + web UI
       - "6333:6333"   # Qdrant (same container)
@@ -15,8 +18,13 @@ services:
       MEM0_EMBED_DIMS: "${MEM0_EMBED_DIMS:-768}"
       MEM0_CHUNK_CHARS: "${MEM0_CHUNK_CHARS:-3000}"
       MEM0_DEFAULT_USER_ID: ${MEM0_DEFAULT_USER_ID:-dev}
+      MEM0_STRICT_DIMS: "1"   # refuse to start on a dimension mismatch instead of deleting memories
+      HF_HOME: /model_cache   # embedding model cache lives in a volume
     volumes:
       - qdrant_data:/qdrant/storage
+      # Embedding model cache: survives rebuilds/recreates, so the ~160 MB
+      # download happens once in the container's lifetime, not every update.
+      - model_cache:/model_cache
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request,json; d=json.loads(urllib.request.urlopen('http://localhost:8765/health',timeout=10).read()); exit(0 if d.get('status')=='ok' else 1)"]
       interval: 15s
@@ -26,3 +34,4 @@ services:
 
 volumes:
   qdrant_data:
+  model_cache:

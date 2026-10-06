@@ -175,12 +175,15 @@ class TestSetupShUpdateBranch:
         assert "volume prune" not in _UPDATE_BODY
 
     def test_update_branch_waits_then_verifies_health(self):
-        # a readiness loop must poll the health endpoint and re-check after it
-        loop = _UPDATE_BODY[:_UPDATE_BODY.find("done")]
-        assert "/health" in loop
-        remainder = _UPDATE_BODY[_UPDATE_BODY.find("done"):]
-        assert remainder.count("/health") >= 1
-        assert "exit 0" in remainder or "exit 1" in remainder
+        # Readiness now lives in wait_for_ready()/server_ready() (defined above
+        # the branch) which asserts status=="ok" on the body - a plain
+        # `curl -s` exit code also succeeds on a 500. The branch must call it.
+        assert "wait_for_ready" in _UPDATE_BODY
+        remainder = _UPDATE_BODY[_UPDATE_BODY.find("wait_for_ready"):]
+        assert "exit 1" in remainder, "a failed readiness wait must exit non-zero"
+        # and the helper must really parse the health body
+        assert 'get("status") == "ok"' in _SETUP_TEXT or "get('status') == 'ok'" in _SETUP_TEXT
+        assert "curl -fs" in _SETUP_TEXT, "readiness must fail on HTTP >= 400"
 
     def test_update_branch_mentions_data_preservation(self):
         assert "preserv" in _UPDATE_BODY.lower()
@@ -366,8 +369,12 @@ class TestEntrypointStatic:
         assert "kill -0" in _ENTRYPOINT_TEXT
 
     def test_fallback_strings_present(self):
-        assert "Falling back" in _ENTRYPOINT_TEXT
-        assert "/tmp/qdrant-storage-fallback" in _ENTRYPOINT_TEXT
+        # The /tmp fallback was REMOVED on purpose: it silently lost every
+        # memory written during the run. Unwritable storage must now hard-fail.
+        assert "Falling back" not in _ENTRYPOINT_TEXT
+        assert "/tmp/qdrant-storage-fallback" not in _ENTRYPOINT_TEXT
+        assert "STILL unwritable" in _ENTRYPOINT_TEXT
+        assert "Refusing to start" in _ENTRYPOINT_TEXT
 
     def test_dead_qdrant_prints_captured_log(self):
         i = _ENTRYPOINT_TEXT.find("Qdrant process exited")
