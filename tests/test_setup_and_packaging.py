@@ -18,7 +18,7 @@ Layer 1 (static, runs on any machine with bash/sh + pytest; no services):
                    {'name': {'size': N}} and flat {'size': N} vector configs
                    (exec-tested with stubbed stdin), final line is
                    'exec python3 mcp_server.py', set -e present
-  - Makefile:      test / test-in-container / test-all / up / update targets
+  - Makefile:      test (in-container) / test-host / test-full / up / update targets
                    exist AND referenced tests/ paths exist on disk
   - .env.example:  no MEM0_LLM_MODEL / MEM0_OLLAMA_URL, EMBED vars documented
 
@@ -465,29 +465,30 @@ class TestEnvExample:
 
 class TestMakefile:
     def test_makefile_targets_exist(self):
-        for target in ("test", "test-in-container", "test-all", "up", "update"):
-            assert re.search(rf"^{target}:", _MK, re.M), f"make target '{target}' missing"
+        for target in ("test", "test-container", "test-full", "test-host", "test-all", "up", "update"):
+            assert re.search(rf"^(?:[\w.-]+\s+)*{target}(?:\s+[\w.-]+)*:", _MK, re.M), \
+                f"make target '{target}' missing"
 
-    def test_make_target_test_references_existing_test_files(self):
-        # test -> venv -> the actual pytest line; the file list moved into the
-        # OFFLINE_TESTS variable and the venv guard echoes install hints.
-        body = _make_target_body(_MK, "test")
-        refs = re.findall(r"tests/[A-Za-z0-9_./-]+", body)
-        if not refs:
-            refs = re.findall(r"tests/[A-Za-z0-9_./-]+", _MK)
-        assert refs, "make test must reference tests/ files (directly or via a variable)"
+    def test_makefile_referenced_test_files_all_exist(self):
+        refs = re.findall(r"tests/[A-Za-z0-9_./-]+\.py", _MK)
+        assert refs, "Makefile must reference the test files"
         for ref in refs:
             assert (REPO / ref).exists(), f"Makefile references missing file: {ref}"
 
-    def test_make_target_test_all_local_leg_references_existing_tests(self):
-        body = _make_target_body(_MK, "test-all")
-        refs = re.findall(r"tests/[A-Za-z0-9_./-]+", body)
-        for ref in refs:
-            assert (REPO / ref).exists(), f"Makefile 'test-all' references missing file: {ref}"
+    def test_make_test_runs_the_suite_in_container(self):
+        """Primary path: the suite runs INSIDE the image, so no host python,
+        venv or dependency state can break it."""
+        body = _make_target_body(_MK, "test")
+        assert "docker compose run" in body, body
+        assert "pytest tests/" in body, body
 
-    def test_make_test_in_container_runs_full_tests_dir(self):
-        body = _make_target_body(_MK, "test-in-container")
-        assert "pytest tests/" in body
+    def test_make_test_host_references_existing_tests(self):
+        body = _make_target_body(_MK, "test-host")
+        refs = re.findall(r"tests/[A-Za-z0-9_./-]+", body)
+        if not refs:
+            refs = re.findall(r"tests/[A-Za-z0-9_./-]+", _MK)
+        for ref in refs:
+            assert (REPO / ref).exists(), f"Makefile references missing file: {ref}"
 
     def test_make_up_and_update_call_setup_sh(self):
         assert re.search(r"^up:[^\n]*\n\t\./setup\.sh\s*$", _MK, re.M)
@@ -495,7 +496,10 @@ class TestMakefile:
 
 
 def _make_target_body(mk: str, target: str) -> str:
-    m = re.search(rf"^{target}:[^\n]*\n((?:\t[^\n]*\n?)*)", mk, re.M)
+    """Body of a make target. GNU make allows several targets on one line
+    ('test test-container:'), so match the target as a whole word."""
+    m = re.search(rf"^(?:[\w.-]+\s+)*{re.escape(target)}(?:\s+[\w.-]+)*:[^\n]*\n((?:\t[^\n]*\n?)*)",
+                  mk, re.M)
     assert m, f"Makefile target '{target}' has no recipe"
     return m.group(1)
 

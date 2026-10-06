@@ -1,6 +1,6 @@
-.PHONY: up down logs health update export import import-docs import-docs-dry
+.PHONY: up down logs health update venv test test-container test-all test-full
 
-up:       ## Build + start the single container (Qdrant + MCP server, no Ollama)
+up:       ## Build + start the single container (Qdrant + MCP server)
 	./setup.sh
 
 update:   ## Rebuild image with latest code, preserve all data
@@ -13,44 +13,48 @@ logs:     ## Tail container logs
 	docker compose logs -f mem0-local
 
 health:   ## Check server health
-	curl http://localhost:8765/health | python3 -m json.tool
+	curl -fs http://localhost:8765/health | python3 -m json.tool
 
 shell:    ## Shell into the container
 	docker compose exec mem0-local bash
+
+# ── Tests ────────────────────────────────────────────────────────────────────
+# Everything runs INSIDE the image: same python, same deps, same baked models,
+# no host venv to install. That is the whole point - `make test` behaves
+# identically on a fresh clone, a CI runner, and your laptop.
+
+test test-container:  ## Run the full test suite inside the container (builds if needed)
+	docker compose build -q mem0-local
+	docker compose run --rm --entrypoint python3 mem0-local -m pytest tests/ -q
+
+test-full: ## Same, with per-test output
+	docker compose run --rm --entrypoint python3 mem0-local -m pytest tests/ -v
+
+venv:     ## OPTIONAL host venv for fast iteration without Docker (needs uv)
+	@if [ ! -x .venv/bin/python ]; then \
+	  if command -v uv >/dev/null 2>&1; then \
+	    echo "Creating .venv and installing dependencies (optional path)..."; \
+	    uv venv .venv --python 3.11 >/dev/null && \
+	    uv pip install --python .venv/bin/python -q -r requirements.txt && \
+	    echo "✓ .venv ready"; \
+	  else \
+	    echo "✗ uv not found (brew install uv). Not needed: use 'make test'."; \
+	    exit 1; \
+	  fi; \
+	fi
 
 PY = $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 OFFLINE_TESTS = tests/test_chunking.py tests/test_no_llm.py tests/test_execute_tool_units.py \
                 tests/test_setup_and_packaging.py tests/test_reliability_contract.py
 
-venv:     ## Create/bootstraps the local .venv used by `make test` (needs uv)
-	@if [ ! -x .venv/bin/python ]; then \
-	  echo "Creating .venv (python 3.11) and installing dependencies..."; \
-	  if command -v uv >/dev/null 2>&1; then \
-	    uv venv .venv --python 3.11 >/dev/null && \
-	    uv pip install --python .venv/bin/python -q -r requirements.txt && \
-	    echo "✓ .venv ready"; \
-	  else \
-	    echo "✗ uv not found. Install it: brew install uv"; \
-	    echo "  (or skip the host venv entirely: make test-in-container)"; \
-	    exit 1; \
-	  fi; \
-	fi
-
-test: venv     ## Fast LOCAL tests: pure-Python, no Docker/services (seconds)
+test-host: venv ## Offline-only tests on the HOST (fast, no Docker; needs .venv)
 	@$(PY) -c "import pytest" 2>/dev/null || { \
-	  echo "pytest missing for $(PY). Install it with one of:"; \
-	  echo "  uv pip install --python .venv/bin/python pytest   (repo venv)"; \
-	  echo "  python3 -m pip install --user pytest              (system python)"; \
-	  echo "  make test-in-container                            (no host python needed)"; \
-	  exit 1; }
-	$(PY) -m pytest $(OFFLINE_TESTS) -v
+	  echo "pytest missing for $(PY) - run 'make venv' or just use 'make test'"; exit 1; }
+	$(PY) -m pytest $(OFFLINE_TESTS) -q
 
-test-in-container: ## Full suite inside the container - NO host python needed
-	docker compose run --rm mem0-local pytest tests/ -v
-
-test-all: ## Unit locally (all offline tiers) + full suite in container
-	$(PY) -m pytest $(OFFLINE_TESTS) -q \
-	  && docker compose run --rm mem0-local pytest tests/ -q
+test-all: test ## Local (container) suite, then the same suite again for good measure
+	@echo ""
+	@echo "Suite ran in-container. For host-only iteration: make test-host"
 
 export:   ## Export memories to JSON (usage: make export USER=dev)
 	@USER_ID=$$(echo "$(USER)" | sed 's/^$$/dev/'); \

@@ -65,9 +65,11 @@ print(f'baked embedding model OK: {len(v)} dims')"
 RUN python3 -m spacy download en_core_web_sm \
     && python3 -c "import spacy; spacy.load('en_core_web_sm'); print('baked spaCy model OK')"
 
-# Application code
+# Application code. The deployment scripts ship TOO, because the packaging
+# contract tests read them as text - so the whole suite runs inside the image.
 COPY mcp_server.py selftest.py entrypoint.sh pytest.ini conftest.py ./
 COPY tests/ tests/
+COPY Dockerfile docker-compose.yml setup.sh Makefile .env.example requirements.txt ./
 RUN chmod +x entrypoint.sh
 # Clear any Python bytecode cache so updated .py files are always used
 RUN find /app -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; \
