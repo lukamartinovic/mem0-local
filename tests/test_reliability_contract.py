@@ -185,3 +185,56 @@ class TestScriptsExecute:
     def test_entrypoint_last_line_starts_server(self):
         lines = [l.strip() for l in ENTRY_TEXT.strip().splitlines() if l.strip()]
         assert lines[-1] == "exec python3 mcp_server.py"
+
+# ── Config migration: the failures seen in the wild ──────────────────────────
+
+class TestConfigMigration:
+    """A .env written by the Ollama-era setup.sh breaks the container today:
+    it pins MEM0_EMBED_MODEL=nomic-embed-text, fastembed only knows HuggingFace
+    repo ids, and the server dies with 'Model ... is not supported'."""
+
+    def test_legacy_ollama_tag_maps_to_fastembed_repo_id(self):
+        sys.path.insert(0, REPO)
+        import mcp_server
+        assert mcp_server._resolve_embed_model("nomic-embed-text") == "nomic-ai/nomic-embed-text-v1.5"
+        assert mcp_server._resolve_embed_model("nomic-embed-text:v1.5") == "nomic-ai/nomic-embed-text-v1.5"
+
+    def test_current_repo_id_passes_through(self):
+        sys.path.insert(0, REPO)
+        import mcp_server
+        for name in ("nomic-ai/nomic-embed-text-v1.5", "nomic-ai/nomic-embed-text-v1.5-Q"):
+            assert mcp_server._resolve_embed_model(name) == name
+
+    def test_compose_default_is_a_fastembed_repo_id(self):
+        m = re.search(r"MEM0_EMBED_MODEL:\s*\$\{MEM0_EMBED_MODEL:-([^}]+)\}", COMPOSE_TEXT)
+        assert m, "compose must default MEM0_EMBED_MODEL"
+        assert m.group(1).startswith("nomic-ai/"), m.group(1)
+
+    def test_dockerfile_default_is_a_fastembed_repo_id(self):
+        m = re.search(r"MEM0_EMBED_MODEL=(\S+)", DOCKERFILE_TEXT)
+        assert m and m.group(1).startswith("nomic-ai/"), m.group(1) if m else None
+
+
+class TestSpacyGuard:
+    """mem0 lemmatizes every add/search. If the model is missing it downloads
+    it, and that path calls sys.exit(1) - SystemExit is a BaseException, so
+    mem0's `except Exception` misses it and the SERVER PROCESS DIES."""
+
+    def test_guard_exists_in_server(self):
+        assert "_ensure_spacy_lemmatizer_safe" in open(os.path.join(REPO, "mcp_server.py")).read()
+
+    def test_guard_runs_at_import_and_neuters_the_download(self):
+        sys.path.insert(0, REPO)
+        import mcp_server  # noqa: F401  (importing applies the guard)
+        try:
+            import spacy
+            import mem0.utils.spacy_models as sm
+        except ImportError:
+            return  # not installed in this environment: guard untestable here
+        # whatever the machine state, a missing model must degrade, never sys.exit
+        if not spacy.util.is_package("en_core_web_sm"):
+            assert sm.get_nlp_lemma() is None, "a missing model must degrade, never sys.exit"
+
+    def test_warning_is_surfaced_in_health(self):
+        src = open(os.path.join(REPO, "mcp_server.py")).read()
+        assert "lemmatizer" in src and "_SPACY_WARNING" in src

@@ -207,12 +207,31 @@ class TestToolSurface:
 
 class TestModuleHygiene:
     def test_zero_ollama_strings_in_server(self):
+        """No Ollama dependency may remain. A legacy NAME mapping is allowed
+        (an old .env carries Ollama's tag name for the same nomic model), but
+        no import, URL, or client may reference Ollama."""
         src = open(os.path.join(REPO, "mcp_server.py")).read()
-        bad = [l for l in src.splitlines()
-               if "ollama" in l.lower()
-               and "no ollama" not in l.lower()
-               and "no llm" not in l.lower()]
+        bad = []
+        for l in src.splitlines():
+            low = l.lower()
+            if "ollama" not in low:
+                continue
+            if "no ollama" in low or "no llm" in low:
+                continue
+            # the alias table maps the legacy tag onto the fastembed repo id
+            if "nomic-embed-text" in low and "_EMBED_MODEL_ALIASES" not in low and ":" in low:
+                continue
+            s = l.strip()
+            if s.startswith("#") or s.startswith('"""') or s.endswith('"""'):
+                continue  # comments/docstrings mentioning the legacy name are fine
+            bad.append(s)
         assert not bad, f"live ollama references remain: {bad[:3]}"
+
+    def test_no_ollama_imports_or_urls(self):
+        src = open(os.path.join(REPO, "mcp_server.py")).read().lower()
+        for forbidden in ("import ollama", "from ollama", "ollama:", "11434", "ollama_base_url",
+                          "ollama_url", "ollama serve", "ollamallm"):
+            assert forbidden not in src, f"Ollama dependency leaked back in: {forbidden}"
 
     def test_no_openai_call_sites_outside_neuter(self):
         src = open(os.path.join(REPO, "mcp_server.py")).read()

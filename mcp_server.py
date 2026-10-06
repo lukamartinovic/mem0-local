@@ -50,9 +50,58 @@ QDRANT_HOST = _env("MEM0_QDRANT_HOST", "127.0.0.1")
 QDRANT_PORT = _env_int("MEM0_QDRANT_PORT", 6333)
 QDRANT_URL = f"http://{QDRANT_HOST}:{QDRANT_PORT}"
 
-EMBED_MODEL = _env("MEM0_EMBED_MODEL", "nomic-ai/nomic-embed-text-v1.5")
+# Embedding model naming: fastembed resolves HuggingFace REPO ids, not Ollama
+# tag names. A .env left over from the Ollama era still carries
+# "nomic-embed-text" (the same 768-dim model under a different name), which
+# would otherwise kill startup with a confusing "not supported" error.
+_EMBED_MODEL_ALIASES = {
+    "nomic-embed-text": "nomic-ai/nomic-embed-text-v1.5",
+    "nomic-embed-text:v1.5": "nomic-ai/nomic-embed-text-v1.5",
+    "nomic-embed-text-v1.5": "nomic-ai/nomic-embed-text-v1.5",
+}
+
+
+def _resolve_embed_model(raw: str) -> str:
+    """Map legacy Ollama-era names onto the fastembed repo id."""
+    return _EMBED_MODEL_ALIASES.get(raw.strip(), raw.strip())
+
+
+EMBED_MODEL = _resolve_embed_model(_env("MEM0_EMBED_MODEL", "nomic-ai/nomic-embed-text-v1.5"))
 EMBED_DIMS = _env_int("MEM0_EMBED_DIMS", 768)
 CHUNK_CHARS = _env_int("MEM0_CHUNK_CHARS", 3000)
+
+
+# ── spaCy lemmatization guard ────────────────────────────────────────────────
+# mem0 lemmatizes every add() and search() for BM25 metadata. If the spaCy
+# model is missing it tries to download it, and that download path calls
+# sys.exit(1) on failure - SystemExit inherits BaseException, so mem0's own
+# `except Exception` never catches it and the MCP SERVER PROCESS DIES mid-call.
+# Marking the model unresolvable up front makes mem0 skip it and fall back to
+# raw text, which only degrades BM25 keyword matching.
+def _ensure_spacy_lemmatizer_safe() -> Optional[str]:
+    """Return a warning string if lemmatization had to be disabled."""
+    try:
+        import spacy
+    except ImportError:
+        return "spaCy not installed"  # mem0 handles this itself
+    if spacy.util.is_package("en_core_web_sm"):
+        return None
+    # Prevent the download attempt that can sys.exit() the whole server.
+    try:
+        import mem0.utils.spacy_models as _sm
+
+        def _no_model():
+            return None
+
+        _sm._ensure_model_available = _no_model
+        _sm._load_failed_lemma = True
+        _sm._load_failed_full = True
+        return "en_core_web_sm missing - lemmatization disabled (BM25 falls back to raw text)"
+    except Exception as exc:  # pragma: no cover - defensive
+        return f"could not guard the spaCy download path: {exc}"
+
+
+_SPACY_WARNING = _ensure_spacy_lemmatizer_safe()
 
 DEFAULT_USER_ID = _env("MEM0_DEFAULT_USER_ID", "dev")
 MCP_HOST = _env("MCP_HOST", "0.0.0.0")
@@ -601,6 +650,7 @@ def _build_health_response() -> dict:
         "tools": len(TOOL_DEFINITIONS),
         "config": {
             "extraction_llm": None,
+            "lemmatizer": "disabled" if _SPACY_WARNING else "en_core_web_sm",
             "embedder": EMBED_MODEL,
             "embed_dims": EMBED_DIMS,
             "vector_store": "qdrant",
@@ -1469,6 +1519,8 @@ async def main():
     server = await asyncio.start_server(http_handler, MCP_HOST, MCP_PORT)
     print(f"mem0-local MCP server listening on {MCP_HOST}:{MCP_PORT}", flush=True)
     print(f"  Extraction LLM: none (agent does its own fact inference)", flush=True)
+    if _SPACY_WARNING:
+        print(f"  NOTE: {_SPACY_WARNING}", flush=True)
     print(f"  Embedder: {EMBED_MODEL} ({EMBED_DIMS}d, fastembed/ONNX)", flush=True)
     print(f"  Vector:   Qdrant @ {QDRANT_URL}", flush=True)
     print(f"  Tools:    {len(TOOL_DEFINITIONS)}", flush=True)
