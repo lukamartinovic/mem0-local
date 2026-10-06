@@ -103,6 +103,10 @@ def _ensure_spacy_lemmatizer_safe() -> Optional[str]:
 
 _SPACY_WARNING = _ensure_spacy_lemmatizer_safe()
 
+# Identifies the running code in /health - lets you confirm the container is
+# running the build you think it is (the #1 confusion when a fix "doesn't work").
+SERVER_VERSION = "1.1.0"
+
 DEFAULT_USER_ID = _env("MEM0_DEFAULT_USER_ID", "dev")
 MCP_HOST = _env("MCP_HOST", "0.0.0.0")
 MCP_PORT = _env_int("MCP_PORT", 8765)
@@ -136,8 +140,14 @@ class NoExtractionLLM:
 
 def get_memory() -> Any:
     """Get the mem0 Memory instance. If not initialized, delegate to init_memory()
-    which handles dimension checks, collection creation, and verification."""
-    if _memory is None:
+    which handles dimension checks, collection creation, and verification.
+
+    Self-healing: if a previous init left the object set but the status not
+    'ready' (an exception after assignment), re-run init rather than handing
+    back a half-initialised stack that would keep /health stuck at 'starting'.
+    """
+    global _init_status
+    if _memory is None or _init_status != "ready":
         init_memory()
     return _memory
 
@@ -294,7 +304,10 @@ def init_memory() -> Any:
     Updates the module-level _init_status: "initializing" → "ready" or "error".
     Safe to call from a background thread."""
     global _memory, _init_status, _init_error
-    if _memory is None:
+    # Re-init when a previous attempt left us not-ready (half-initialised stack),
+    # not only when _memory is None - otherwise a single transient failure pins
+    # the server in a permanently degraded state.
+    if _memory is None or _init_status != "ready":
         _init_status = "initializing"
         try:
             embed_dims = EMBED_DIMS
@@ -641,12 +654,14 @@ def _build_health_response() -> dict:
     return {
         "status": status,
         "init_status": _init_status,
+        "init_error": _init_error,
         "components": {
             "qdrant": qdrant_ok,
             "mem0": mem0_ok,
             "extraction_llm": False,  # by design: agent does its own fact inference
         },
         "server": "mem0-local",
+        "version": SERVER_VERSION,
         "tools": len(TOOL_DEFINITIONS),
         "config": {
             "extraction_llm": None,
@@ -1517,7 +1532,7 @@ async def main():
     init_memory()
 
     server = await asyncio.start_server(http_handler, MCP_HOST, MCP_PORT)
-    print(f"mem0-local MCP server listening on {MCP_HOST}:{MCP_PORT}", flush=True)
+    print(f"mem0-local MCP server v{SERVER_VERSION} listening on {MCP_HOST}:{MCP_PORT}", flush=True)
     print(f"  Extraction LLM: none (agent does its own fact inference)", flush=True)
     if _SPACY_WARNING:
         print(f"  NOTE: {_SPACY_WARNING}", flush=True)

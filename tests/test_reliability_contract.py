@@ -238,3 +238,31 @@ class TestSpacyGuard:
     def test_warning_is_surfaced_in_health(self):
         src = open(os.path.join(REPO, "mcp_server.py")).read()
         assert "lemmatizer" in src and "_SPACY_WARNING" in src
+
+class TestHealthIdentifiesTheBuild:
+    """A live server reporting 'starting' while the code on disk looked fine
+    cost a long debugging detour: there was no way to tell WHICH build was
+    running. /health now carries a version and the init error."""
+
+    def test_version_in_health(self):
+        sys.path.insert(0, REPO)
+        import mcp_server
+        h = mcp_server._build_health_response()
+        assert h["version"] == mcp_server.SERVER_VERSION
+        assert h["version"].count(".") == 2
+
+    def test_init_error_field_present(self):
+        sys.path.insert(0, REPO)
+        import mcp_server
+        assert "init_error" in mcp_server._build_health_response()
+
+    def test_get_memory_retries_when_status_not_ready(self):
+        """A half-initialised stack (memory set, status stale) must re-init
+        instead of pinning /health at 'starting' forever."""
+        src = open(os.path.join(REPO, "mcp_server.py")).read()
+        assert 'if _memory is None or _init_status != "ready"' in src
+        assert 'if _memory is None or _init_status != "ready":\n        _init_status = "initializing"' in src
+
+    def test_version_matches_in_banner(self):
+        src = open(os.path.join(REPO, "mcp_server.py")).read()
+        assert "SERVER_VERSION} listening on" in src
