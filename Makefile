@@ -19,15 +19,37 @@ shell:    ## Shell into the container
 	docker compose exec mem0-local bash
 
 PY = $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
+OFFLINE_TESTS = tests/test_chunking.py tests/test_no_llm.py tests/test_execute_tool_units.py \
+                tests/test_setup_and_packaging.py tests/test_reliability_contract.py
 
-test:     ## Fast LOCAL tests: pure-Python, no Docker/services (seconds)
-	$(PY) -m pytest tests/test_chunking.py tests/test_no_llm.py tests/test_execute_tool_units.py tests/test_setup_and_packaging.py tests/test_reliability_contract.py -v
+venv:     ## Create/bootstraps the local .venv used by `make test` (needs uv)
+	@if [ ! -x .venv/bin/python ]; then \
+	  echo "Creating .venv (python 3.11) and installing dependencies..."; \
+	  if command -v uv >/dev/null 2>&1; then \
+	    uv venv .venv --python 3.11 >/dev/null && \
+	    uv pip install --python .venv/bin/python -q -r requirements.txt && \
+	    echo "✓ .venv ready"; \
+	  else \
+	    echo "✗ uv not found. Install it: brew install uv"; \
+	    echo "  (or skip the host venv entirely: make test-in-container)"; \
+	    exit 1; \
+	  fi; \
+	fi
 
-test-in-container: ## Full suite inside the container (make up first)
+test: venv     ## Fast LOCAL tests: pure-Python, no Docker/services (seconds)
+	@$(PY) -c "import pytest" 2>/dev/null || { \
+	  echo "pytest missing for $(PY). Install it with one of:"; \
+	  echo "  uv pip install --python .venv/bin/python pytest   (repo venv)"; \
+	  echo "  python3 -m pip install --user pytest              (system python)"; \
+	  echo "  make test-in-container                            (no host python needed)"; \
+	  exit 1; }
+	$(PY) -m pytest $(OFFLINE_TESTS) -v
+
+test-in-container: ## Full suite inside the container - NO host python needed
 	docker compose run --rm mem0-local pytest tests/ -v
 
 test-all: ## Unit locally (all offline tiers) + full suite in container
-	$(PY) -m pytest tests/test_chunking.py tests/test_no_llm.py tests/test_execute_tool_units.py tests/test_setup_and_packaging.py tests/test_reliability_contract.py -q \
+	$(PY) -m pytest $(OFFLINE_TESTS) -q \
 	  && docker compose run --rm mem0-local pytest tests/ -q
 
 export:   ## Export memories to JSON (usage: make export USER=dev)
