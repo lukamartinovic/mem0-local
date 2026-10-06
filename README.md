@@ -2,6 +2,10 @@
 
 Self-hosted [Mem0](https://mem0.ai) memory layer for AI coding agents, running **entirely on your machine** — no cloud API calls, no data leaving your laptop.
 
+> **Documents:** [`SPEC.md`](SPEC.md) is the complete current specification (what the
+> system is and does today). [`VISION.md`](VISION.md) is the forward-looking product
+> vision and roadmap.
+
 ## The one thing to understand
 
 **This server has NO extraction LLM.** Fact inference is the calling agent's responsibility: your agent is smart, so it extracts facts itself and stores each one as its own concise memory. All storage paths are LLM-free and fully local (fastembed ONNX embeddings + Qdrant vectors inside a single container).
