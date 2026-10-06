@@ -673,6 +673,63 @@ def _build_health_response() -> dict:
     }
 
 
+def _import_memory_items(uid: str, items: List[dict]) -> dict:
+    """Store a list of memory items for one user, skipping duplicates.
+
+    Single implementation shared by the import_memories MCP tool and the web
+    UI's /api/import endpoint, so both paths validate and dedupe identically.
+    Items may be dicts ({'memory'|'text'|'content', 'metadata'}) or plain strings.
+    """
+    m = get_memory()
+    imported = 0
+    skipped = 0
+    failed = 0
+    errors: List[str] = []
+
+    # Existing texts for duplicate detection (case-insensitive).
+    try:
+        existing_mems = m.get_all(filters={"user_id": uid}, top_k=10000)
+        existing_list = existing_mems if isinstance(existing_mems, list) else existing_mems.get("results", [])
+        existing_texts = set()
+        for mem in existing_list:
+            if isinstance(mem, dict):
+                text = mem.get("memory", "")
+                if text:
+                    existing_texts.add(text.strip().lower())
+    except Exception:
+        existing_texts = set()
+
+    for item in items:
+        if not isinstance(item, dict):
+            failed += 1
+            errors.append(f"Non-dict item skipped: {type(item).__name__}")
+            continue
+        mem_text = item.get("memory", "") or item.get("text", "") or item.get("content", "")
+        if not mem_text or not str(mem_text).strip():
+            failed += 1
+            errors.append("Empty memory text, skipped")
+            continue
+        mem_text = str(mem_text)
+        if mem_text.strip().lower() in existing_texts:
+            skipped += 1
+            continue
+        try:
+            m.add(mem_text, user_id=uid, metadata=item.get("metadata"), infer=False)
+            existing_texts.add(mem_text.strip().lower())
+            imported += 1
+        except Exception as e:
+            failed += 1
+            errors.append(f"Failed to import: {e}")
+
+    return {
+        "imported": imported,
+        "skipped": skipped,
+        "failed": failed,
+        "errors": errors if errors else None,
+        "user_id": uid,
+    }
+
+
 # ── Tool execution ──────────────────────────────────────────────────────────
 
 def execute_tool(name: str, arguments: dict) -> dict:
@@ -993,56 +1050,7 @@ def execute_tool(name: str, arguments: dict) -> dict:
         if not isinstance(parsed, list):
             raise Mem0Error("data must be a JSON array of memory objects.", tool=name)
 
-        imported = 0
-        skipped = 0
-        failed = 0
-        errors: List[str] = []
-
-        # Fetch existing memory texts for duplicate detection
-        try:
-            existing_mems = m.get_all(filters={"user_id": uid}, top_k=10000)
-            existing_list = existing_mems if isinstance(existing_mems, list) else existing_mems.get("results", [])
-            existing_texts = set()
-            for mem in existing_list:
-                if isinstance(mem, dict):
-                    text = mem.get("memory", "")
-                    if text:
-                        existing_texts.add(text.strip().lower())
-        except Exception:
-            existing_texts = set()
-
-        for item in parsed:
-            if not isinstance(item, dict):
-                failed += 1
-                errors.append(f"Non-dict item skipped: {type(item).__name__}")
-                continue
-            mem_text = item.get("memory", "") or item.get("text", "") or item.get("content", "")
-            if not mem_text or not mem_text.strip():
-                failed += 1
-                errors.append("Empty memory text, skipped")
-                continue
-
-            # Skip duplicates (case-insensitive comparison)
-            if mem_text.strip().lower() in existing_texts:
-                skipped += 1
-                continue
-
-            try:
-                mem_metadata = item.get("metadata")
-                m.add(mem_text, user_id=uid, metadata=mem_metadata, infer=False)
-                existing_texts.add(mem_text.strip().lower())
-                imported += 1
-            except Exception as e:
-                failed += 1
-                errors.append(f"Failed to import: {e}")
-
-        return {
-            "imported": imported,
-            "skipped": skipped,
-            "failed": failed,
-            "errors": errors if errors else None,
-            "user_id": uid,
-        }
+        return _import_memory_items(uid, parsed)
 
     # ── prune_memories ──────────────────────────────────────────────────────
     elif name == "prune_memories":
@@ -1182,7 +1190,12 @@ def _scroll_all_memories() -> dict:
 
 
 def _render_web_ui() -> str:
-    """Render a simple HTML page for browsing memories in the database."""
+    """Render the memory browser, with export/import controls.
+
+    Export uses the same payload shape as the `export_memories` MCP tool, so
+    files are interchangeable between the UI, the CLI and the agent. Import
+    accepts either a UI/CLI export, a bare JSON array, or JSON Lines.
+    """
     return """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1193,82 +1206,266 @@ def _render_web_ui() -> str:
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, system-ui, sans-serif; background: #0d1117; color: #c9d1d9; padding: 20px; }
 h1 { color: #58a6ff; margin-bottom: 16px; font-size: 1.4rem; }
-.stats { display: flex; gap: 16px; margin-bottom: 20px; }
+.stats { display: flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
 .stat { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px 16px; }
 .stat-value { font-size: 1.5rem; font-weight: bold; color: #58a6ff; }
 .stat-label { font-size: 0.8rem; color: #8b949e; }
-.filter-bar { margin-bottom: 16px; }
-input, select { background: #161b22; border: 1px solid #30363d; color: #c9d1d9; padding: 8px 12px; border-radius: 6px; font-size: 0.9rem; }
-input[type=text] { width: 300px; }
+.filter-bar { margin-bottom: 16px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+input, select, textarea, button { background: #161b22; border: 1px solid #30363d; color: #c9d1d9; padding: 8px 12px; border-radius: 6px; font-size: 0.9rem; font-family: inherit; }
+input[type=text] { width: 280px; }
+button { cursor: pointer; }
+button:hover { border-color: #58a6ff; }
+button.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+button.primary:hover { background: #388bfd; }
 .memories { display: flex; flex-direction: column; gap: 8px; }
 .mem-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; }
 .mem-text { font-size: 0.95rem; line-height: 1.5; margin-bottom: 8px; }
-.mem-meta { display: flex; gap: 12px; font-size: 0.75rem; color: #8b949e; }
+.mem-meta { display: flex; gap: 12px; font-size: 0.75rem; color: #8b949e; flex-wrap: wrap; }
 .mem-meta span { background: #21262d; padding: 2px 8px; border-radius: 4px; }
 .empty { color: #8b949e; text-align: center; padding: 40px; }
 .error { color: #f85149; }
+.ok { color: #3fb950; }
 a { color: #58a6ff; }
 .refresh { float: right; }
+.panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 16px; display: none; }
+.panel.open { display: block; }
+.panel h2 { font-size: 0.95rem; color: #58a6ff; margin-bottom: 10px; }
+.panel label { display: block; font-size: 0.8rem; color: #8b949e; margin: 10px 0 4px; }
+textarea { width: 100%; min-height: 120px; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 0.8rem; }
+.hint { font-size: 0.75rem; color: #8b949e; margin-top: 6px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+#result { margin-top: 10px; font-size: 0.85rem; }
 </style>
 </head>
 <body>
 <h1>mem0-local <button class="refresh" onclick="load()">Refresh</button></h1>
 <div class="stats">
-  <div class="stat"><div class="stat-value" id="count">—</div><div class="stat-label">memories</div></div>
-  <div class="stat"><div class="stat-value" id="entities">—</div><div class="stat-label">entities</div></div>
+  <div class="stat"><div class="stat-value" id="count">-</div><div class="stat-label">memories shown</div></div>
+  <div class="stat"><div class="stat-value" id="entities">-</div><div class="stat-label">entities</div></div>
 </div>
+
 <div class="filter-bar">
   <input type="text" id="search" placeholder="Filter memories..." oninput="filter()">
   <select id="entity-filter" onchange="filter()"><option value="">All entities</option></select>
+  <button onclick="togglePanel('export-panel')">Export</button>
+  <button onclick="togglePanel('import-panel')">Import</button>
 </div>
+
+<div class="panel" id="export-panel">
+  <h2>Export memories</h2>
+  <label for="export-entity">Entity (user_id)</label>
+  <select id="export-entity"><option value="">All entities</option></select>
+  <div class="row">
+    <button class="primary" onclick="doExport('json')">Download JSON</button>
+    <button onclick="doExport('csv')">Download CSV</button>
+    <button onclick="copyExport()">Copy JSON to clipboard</button>
+  </div>
+  <div class="hint">Same format as the <code>export_memories</code> MCP tool, so the file can be re-imported here, via <code>make import</code>, or by an agent.</div>
+  <div id="export-result"></div>
+</div>
+
+<div class="panel" id="import-panel">
+  <h2>Import memories</h2>
+  <label for="import-entity">Target entity (user_id) - required</label>
+  <input type="text" id="import-entity" placeholder="e.g. myproject">
+  <label for="import-file">Upload a file exported above (or any JSON array)</label>
+  <input type="file" id="import-file" accept=".json,.txt,.jsonl,.csv">
+  <label for="import-text">...or paste JSON directly</label>
+  <textarea id="import-text" placeholder='[{"memory": "Auth uses JWT with 24h expiry", "metadata": {"source": "manual"}}]'></textarea>
+  <div class="row">
+    <button class="primary" onclick="doImport(false)">Import</button>
+    <button onclick="doImport(true)">Preview only (no writes)</button>
+  </div>
+  <div class="hint">Accepts a UI/CLI export, a bare JSON array, JSON Lines, or a CSV exported above. Duplicates (same text, same entity) are skipped.</div>
+  <div id="import-result"></div>
+</div>
+
 <div class="memories" id="list"><div class="empty">Loading...</div></div>
+
 <script>
 let allMems = [];
+
 async function load() {
   try {
     const r = await fetch('/api/memories');
     const d = await r.json();
     allMems = d.memories || [];
     document.getElementById('count').textContent = allMems.length;
-    document.getElementById('entities').textContent = (d.entities || []).length;
-    const sel = document.getElementById('entity-filter');
-    sel.innerHTML = '<option value="">All entities</option>';
-    (d.entities || []).forEach(e => {
-      const opt = document.createElement('option');
-      opt.value = e; opt.textContent = e; sel.appendChild(opt);
-    });
+    const ents = d.entities || [];
+    document.getElementById('entities').textContent = ents.length;
+    for (const id of ['entity-filter', 'export-entity']) {
+      const sel = document.getElementById(id);
+      const keep = sel.value;
+      sel.innerHTML = '<option value="">All entities</option>';
+      ents.forEach(e => {
+        const opt = document.createElement('option');
+        opt.value = e; opt.textContent = e; sel.appendChild(opt);
+      });
+      sel.value = keep;
+    }
     render(allMems);
   } catch(e) {
     document.getElementById('list').innerHTML = '<div class="error">Failed to load: ' + e + '</div>';
   }
 }
+
 function filter() {
   const q = document.getElementById('search').value.toLowerCase();
   const ent = document.getElementById('entity-filter').value;
   let filtered = allMems;
   if (q) filtered = filtered.filter(m => JSON.stringify(m).toLowerCase().includes(q));
   if (ent) filtered = filtered.filter(m => (m.user_id || '') === ent);
+  document.getElementById('count').textContent = filtered.length;
   render(filtered);
 }
+
 function render(mems) {
   const el = document.getElementById('list');
   if (!mems.length) { el.innerHTML = '<div class="empty">No memories found</div>'; return; }
   el.innerHTML = mems.map(m => {
     const text = (m.memory || m.memory_text || m.text || '').replace(/</g, '&lt;');
-    const uid = m.user_id || '—';
+    const uid = m.user_id || '-';
     const id = (m.id || m.memory_id || '').substring(0, 12);
-    const created = m.created_at ? new Date(m.created_at).toLocaleString() : '—';
+    const created = m.created_at ? new Date(m.created_at).toLocaleString() : '-';
     const score = m.score != null ? m.score.toFixed(3) : '';
     let meta = `<span>${uid}</span><span>${id}</span><span>${created}</span>`;
     if (score) meta += `<span>score: ${score}</span>`;
     return `<div class="mem-card"><div class="mem-text">${text}</div><div class="mem-meta">${meta}</div></div>`;
   }).join('');
 }
+
+function togglePanel(id) {
+  document.getElementById(id).classList.toggle('open');
+}
+
+function exportRows() {
+  const ent = document.getElementById('export-entity').value;
+  return ent ? allMems.filter(m => (m.user_id || '') === ent) : allMems.slice();
+}
+
+function doExport(fmt) {
+  const rows = exportRows();
+  let blob, name;
+  if (fmt === 'csv') {
+    const cols = ['id', 'memory', 'metadata', 'created_at', 'user_id'];
+    const esc = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+    const lines = [cols.join(',')].concat(rows.map(r => [
+      r.id || '', r.memory || '', JSON.stringify(r.metadata || {}), r.created_at || '', r.user_id || ''
+    ].map(esc).join(',')));
+    blob = new Blob([lines.join('\\n')], {type: 'text/csv'});
+    name = 'memories.csv';
+  } else {
+    const payload = {format: 'json', count: rows.length, memories: rows};
+    blob = new Blob([JSON.stringify(payload, null, 2)], {type: 'application/json'});
+    name = 'memories.json';
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name; a.click();
+  URL.revokeObjectURL(url);
+  document.getElementById('export-result').innerHTML =
+    '<span class="ok">Exported ' + rows.length + ' memories to ' + name + '</span>';
+}
+
+async function copyExport() {
+  const rows = exportRows();
+  const payload = {format: 'json', count: rows.length, memories: rows};
+  try {
+    await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+    document.getElementById('export-result').innerHTML =
+      '<span class="ok">Copied ' + rows.length + ' memories as JSON</span>';
+  } catch (e) {
+    document.getElementById('export-result').innerHTML =
+      '<span class="error">Clipboard blocked by the browser: use Download JSON</span>';
+  }
+}
+
+// Parse whatever the user gave us into an array of {memory, metadata} items.
+function parsePayload(text) {
+  const trimmed = text.trim();
+  if (!trimmed) throw new Error('Nothing to import');
+  let data;
+  try {
+    data = JSON.parse(trimmed);
+  } catch (e) {
+    // JSON Lines fallback
+    const lines = trimmed.split('\\n').map(l => l.trim()).filter(Boolean);
+    try {
+      data = lines.map(l => JSON.parse(l));
+    } catch (e2) {
+      // CSV fallback: expect the header our exporter writes
+      if (lines.length && lines[0].indexOf('memory') !== -1) {
+        const sep = lines[0].indexOf('\\t') !== -1 ? '\\t' : ',';
+        const head = lines[0].split(sep).map(h => h.trim().replace(/^"|"$/g, ''));
+        const mi = head.indexOf('memory');
+        if (mi === -1) throw new Error('CSV has no memory column');
+        data = lines.slice(1).map(l => ({memory: l.split(sep)[mi].replace(/^"|"$/g, '')}));
+      } else {
+        throw new Error('Not valid JSON, JSON Lines, or CSV');
+      }
+    }
+  }
+  // Accept an export envelope, a bare array, or a single object.
+  if (data && !Array.isArray(data) && Array.isArray(data.memories)) data = data.memories;
+  if (!Array.isArray(data)) data = [data];
+  return data.map(item => {
+    if (typeof item === 'string') return {memory: item};
+    if (!item || typeof item !== 'object') return {memory: ''};
+    const text = item.memory || item.text || item.content || '';
+    const out = {memory: text};
+    if (item.metadata) out.metadata = item.metadata;
+    return out;
+  }).filter(i => i.memory && i.memory.trim());
+}
+
+async function readImportInput() {
+  const fileEl = document.getElementById('import-file');
+  if (fileEl.files && fileEl.files.length) {
+    return await fileEl.files[0].text();
+  }
+  return document.getElementById('import-text').value;
+}
+
+async function doImport(preview) {
+  const out = document.getElementById('import-result');
+  const entity = document.getElementById('import-entity').value.trim();
+  if (!entity) { out.innerHTML = '<span class="error">Target entity (user_id) is required</span>'; return; }
+  let items;
+  try {
+    items = parsePayload(await readImportInput());
+  } catch (e) {
+    out.innerHTML = '<span class="error">' + e.message + '</span>';
+    return;
+  }
+  if (!items.length) { out.innerHTML = '<span class="error">No importable items found</span>'; return; }
+  if (preview) {
+    out.innerHTML = '<span class="ok">Preview: ' + items.length + ' memories would be imported into "' + entity + '"</span>' +
+      '<div class="hint">First: ' + items[0].memory.slice(0, 120).replace(/</g, '&lt;') + '</div>';
+    return;
+  }
+  out.innerHTML = 'Importing ' + items.length + ' memories...';
+  try {
+    const r = await fetch('/api/import', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({user_id: entity, memories: items})
+    });
+    const d = await r.json();
+    if (d.error) { out.innerHTML = '<span class="error">' + d.error + '</span>'; return; }
+    out.innerHTML = '<span class="ok">Imported ' + d.imported + '</span>' +
+      '<div class="hint">skipped (duplicates): ' + d.skipped + ' | failed: ' + d.failed + '</div>';
+    document.getElementById('import-text').value = '';
+    document.getElementById('import-file').value = '';
+    load();
+  } catch (e) {
+    out.innerHTML = '<span class="error">Import failed: ' + e + '</span>';
+  }
+}
+
 load();
 </script>
 </body>
 </html>"""
-
 
 async def http_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     """Handle a single HTTP connection. Each connection runs in its own
@@ -1396,6 +1593,43 @@ async def http_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
                 response = json.dumps({"error": str(e)}).encode()
                 header = (
                     f"HTTP/1.1 500 Internal Server Error\r\n"
+                    f"Content-Type: application/json\r\n"
+                    f"Content-Length: {len(response)}\r\n"
+                    f"Connection: close\r\n\r\n"
+                ).encode()
+                writer.write(header + response)
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+            return
+
+        # Import API for the web UI. Reuses the SAME dedupe/validation path as
+        # the import_memories MCP tool, so the UI cannot write memories the
+        # agent could not have written.
+        if method == "POST" and path == "/api/import":
+            try:
+                payload = json.loads(body or b"{}")
+                uid = (payload.get("user_id") or "").strip()
+                items = payload.get("memories") or []
+                if not uid:
+                    raise ValueError("user_id is required")
+                if not isinstance(items, list) or not items:
+                    raise ValueError("memories must be a non-empty array")
+                result = await asyncio.to_thread(
+                    _import_memory_items, uid, items
+                )
+                response = json.dumps(result).encode()
+                header = (
+                    f"HTTP/1.1 200 OK\r\n"
+                    f"Content-Type: application/json\r\n"
+                    f"Content-Length: {len(response)}\r\n"
+                    f"Connection: close\r\n\r\n"
+                ).encode()
+                writer.write(header + response)
+            except Exception as e:
+                response = json.dumps({"error": str(e)}).encode()
+                header = (
+                    f"HTTP/1.1 400 Bad Request\r\n"
                     f"Content-Type: application/json\r\n"
                     f"Content-Length: {len(response)}\r\n"
                     f"Connection: close\r\n\r\n"

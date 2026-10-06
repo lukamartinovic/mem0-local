@@ -93,6 +93,24 @@ Existing memories from the Ollama era survive the migration: both `nomic-embed-t
 
 Restart your IDE after adding the config.
 
+## Web UI (:8765/)
+
+Open **http://localhost:8765/** in a browser to browse and manage memories.
+Reachable from other machines on your LAN at `http://<host-ip>:8765/`.
+
+| Control | What it does |
+|---|---|
+| Filter box / entity dropdown | Client-side filtering over all memories; counts update live |
+| **Export** panel | Download **JSON** or **CSV**, or copy JSON to the clipboard. Optionally scoped to one entity. Same payload shape as the `export_memories` MCP tool. |
+| **Import** panel | Upload a file or paste JSON, targeted at a chosen entity. Accepts a UI/CLI export envelope, a bare JSON array, **JSON Lines**, or the CSV this UI exports. "Preview only" counts what would be imported without writing. |
+
+Import runs through the same helper as the `import_memories` MCP tool, so
+duplicates (same text, same entity) are skipped and failures are reported
+per item - the UI cannot write anything the agent could not have written.
+
+Exports are interchangeable between the UI, the CLI (`make export` / `make import`)
+and your agent, so a browser download can be restored with one command and vice versa.
+
 ## Available MCP tools (12)
 
 ### Storing
